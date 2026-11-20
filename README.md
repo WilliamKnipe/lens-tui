@@ -1,8 +1,9 @@
 # lens
 
-A minimal, read-only repo viewer for the terminal, made to sit in a split next to Claude Code.
-Sidebar file tree, syntax-highlighted viewer, VS Code-style quick open, search, git diffs, and a follow
-mode that jumps to whatever Claude just edited.
+A minimal repo viewer for the terminal, made to sit in a split next to Claude Code.
+Sidebar file tree, syntax-highlighted viewer, VS Code-style quick open, search, git diffs, a follow
+mode that jumps to whatever Claude just edited, and hunk-by-hunk review with staging, commits and push.
+It never edits your files: the only things it writes are to git (the index, commits, push).
 
 <img width="983" height="960" alt="Screenshot 2026-11-20 at 12 25 13" src="https://github.com/user-attachments/assets/9fd0dcc4-51cc-4ffc-bfe8-f2fe6e815cce" />
 
@@ -44,7 +45,12 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | `cmd+↓` `cmd+↑` | Half page down / up (`ctrl+d` `ctrl+u` also work) |
 | `/` then `n` `N` | Search in file, next / previous match |
 | `:` | Go to line |
-| `d` | Toggle git diff vs HEAD (enter jumps to that line). In the sidebar: list changed files only; enter opens a file's diff |
+| `d` | Toggle git diff (enter jumps to that line). In the sidebar: review changed files; enter opens a file's diff |
+| `s` / `S` | Stage the hunk under the cursor / the whole file (in diff view or the review sidebar) |
+| `u` / `U` | Unstage the hunk / the file |
+| `{` `}` | In diff view: previous / next hunk |
+| `c` | Commit: message, staged files and their diffs |
+| `P` | Unpushed commits and push (`cmd+d` too, see below) |
 | `y` / `Y` | Copy path / `path:line` (paste into Claude) |
 | `f` | Follow mode: when a file changes, open it at the edited line (needs git) |
 | `r` | Refresh |
@@ -86,6 +92,41 @@ keybind = cmd+down=unbind
 
 Option+Cmd+arrows (switch split) are separate bindings and keep working. Without this, use `ctrl+d` / `ctrl+u`.
 
+## Review, commit, push
+
+Three separate steps, so you can build up a series of small commits and push them when you're ready.
+
+**Review.** Press `d` in the sidebar. It lists **Changes** (still to review) and, below them, **Staged**
+(reviewed); the title shows `REVIEW 4/9`, the files with nothing left to review. The viewer shows the file's
+diff: its unstaged hunks first, then a `── staged ──` divider and the hunks already staged, marked `✓`.
+
+- `{` `}` jump between hunks. `s` stages the hunk under the cursor and moves to the next one. After the
+  file's last hunk it opens the next file that has changes.
+- `S` stages the whole file and moves on. `u` / `U` unstage a hunk / the file.
+- In the sidebar, `s` / `u` stage or unstage the selected file.
+
+Staging *is* marking something reviewed: lens keeps no state of its own. If Claude edits a file after
+you staged it, only the new edit shows up under Changes, so you only review what's new.
+
+**Commit.** Press `c`. Type the message (the first line is the subject; `shift+enter` adds lines for a
+body, and a counter turns yellow past 50 characters and red past 72). Below it are the staged files with
+line counts, then the files that won't be committed, and a diff preview of the selected file.
+
+- `enter` commits. If **nothing is staged**, the popup says so and `enter` commits every change
+  (`git add -A && git commit`), which is the quick path when you're confident.
+- `tab` moves to the file list: `j` `k` select (the preview follows), `space` stages or unstages a file.
+- `ctrl+a` toggles amend (it fills in the last commit's message).
+- `esc` closes it and keeps the message as a draft. Commit hooks run as usual; if one fails, its output
+  shows in the popup and your message stays.
+
+**Push.** When there are commits that aren't pushed, the status bar shows `↑3 P push`. Press `P` to see
+the commit graph (like `git log --graph --oneline --decorate`) with the unpushed commits highlighted and
+the files each one changed. `enter` pushes; a branch with no upstream is pushed with `-u`. Git never
+prompts for a password inside lens. If it needs credentials, push once from a shell.
+
+Ghostty uses Cmd+D for "split right", so `P` is the main key. To use Cmd+D for this in lens, add
+`keybind = cmd+d=unbind` to Ghostty's config. That frees Cmd+D in every pane.
+
 ## Live updates
 
 lens checks the open file and `git status` once a second. When Claude edits a file, the viewer reloads
@@ -102,7 +143,7 @@ edited, lens opens it and puts the cursor on the change, so the viewer keeps up 
   just edited (or its first change against HEAD, the first time lens sees the file change).
 - The edited line is shown about 10 lines below the top of the view, so you can see what's above it.
 - In diff view (or the changed-files sidebar), files open in diff view at the hunk that was just edited.
-- It doesn't jump while Ctrl+P, Ctrl+F or a prompt is open.
+- It doesn't jump while Ctrl+P, Ctrl+F, the commit or push popup, or a prompt is open.
 
 Changed lines are highlighted in the normal view too, not just in diff view: a green bar in the gutter
 for added lines, yellow for modified lines, and a red `▔` where lines were removed. New files aren't

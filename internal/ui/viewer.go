@@ -31,7 +31,9 @@ type viewer struct {
 	diffPlain []string
 	diffNums  []int // new-file line number per diff line (0 = removed/header)
 	diffNote  string
-	fileCur   int // file position saved while showing the diff
+	diffHunk  []int      // hunk index per diff row (-1 for none)
+	hunks     []diffHunk // unstaged hunks first, then staged ones
+	fileCur   int        // file position saved while showing the diff
 	fileOff   int
 
 	marks map[int]byte // 1-based file line -> change against HEAD (see changeMarks)
@@ -242,60 +244,31 @@ func (v *viewer) highlightDiff() {
 	}
 }
 
-// splitDiff splits diff output into lines, expanding tabs in the code after
-// each line's +/-/space marker so tab stops match the file view.
-func splitDiff(out string) []string {
-	out = strings.ReplaceAll(out, "\r\n", "\n")
-	lines := strings.Split(out, "\n")
-	if len(lines) > 1 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	for i, l := range lines {
-		if l != "" && strings.IndexByte("+- \\", l[0]) >= 0 {
-			lines[i] = l[:1] + files.ExpandTabs(l[1:])
-		} else {
-			lines[i] = files.ExpandTabs(l)
-		}
-	}
-	return lines
+// diffHunk is a hunk shown in the diff view, with the patch that stages it
+// (or, for a staged hunk, unstages it).
+type diffHunk struct {
+	staged     bool
+	patch      string
+	start, end int // rows [start, end) in the diff view, header row included
 }
 
-// setDiff loads `git diff` output. Header lines before the first hunk are dropped.
-func (v *viewer) setDiff(out string, err error, first bool) {
+// setDiff loads the file's unstaged diff (index → working tree) and staged
+// diff (HEAD → index). Unstaged hunks come first, then a divider and the
+// staged ones. Header lines before the first hunk are not shown.
+func (v *viewer) setDiff(unstaged, staged string, err error, first bool) {
 	v.diffLines, v.diffPlain, v.diffNums, v.diffNote = nil, nil, nil, ""
+	v.hunks, v.diffHunk = nil, nil
 	if err != nil {
 		v.diffNote = "git diff failed: " + err.Error()
 	}
-	inHunk, n := false, 0
-	for _, l := range splitDiff(out) {
-		if m := hunkRe.FindStringSubmatch(l); m != nil {
-			inHunk = true
-			n, _ = strconv.Atoi(m[1])
-			v.diffPlain = append(v.diffPlain, l)
-			v.diffLines = append(v.diffLines, sHunk.Render(l))
-			v.diffNums = append(v.diffNums, 0)
-			continue
+	v.addDiffSection(files.ParseDiff(unstaged), false)
+	if sd := files.ParseDiff(staged); len(sd.Header) > 0 || len(sd.Hunks) > 0 {
+		label := "── staged ─────────────"
+		if len(v.diffPlain) == 0 {
+			label = "── staged · nothing left to review (u unstages a hunk) ──"
 		}
-		if !inHunk {
-			continue
-		}
-		num := 0
-		styled := l
-		switch {
-		case strings.HasPrefix(l, "+"):
-			num, styled = n, sAdd.Render(l)
-			n++
-		case strings.HasPrefix(l, "-"):
-			styled = sDel.Render(l)
-		case strings.HasPrefix(l, `\`):
-			styled = sDim.Render(l)
-		default:
-			num = n
-			n++
-		}
-		v.diffPlain = append(v.diffPlain, l)
-		v.diffLines = append(v.diffLines, styled)
-		v.diffNums = append(v.diffNums, num)
+		v.addDiffRow(label, sDim.Render(label), 0, -1)
+		v.addDiffSection(sd, true)
 	}
 	v.highlightDiff()
 	if len(v.diffLines) == 0 && v.diffNote == "" {
@@ -305,7 +278,7 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 		// start on the first change near where we were in the file
 		v.cur, v.off = 0, 0
 		for i, l := range v.diffPlain {
-			if (strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-")) && (v.diffNums[i] == 0 || v.diffNums[i] >= v.fileCur) {
+			if v.diffHunk[i] >= 0 && (strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-")) && (v.diffNums[i] == 0 || v.diffNums[i] >= v.fileCur) {
 				v.cur = i
 				break
 			}
@@ -314,6 +287,151 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 	}
 	v.findMatches()
 	v.clamp()
+}
+
+func (v *viewer) addDiffRow(plain, styled string, num, hunk int) {
+	v.diffPlain = append(v.diffPlain, plain)
+	v.diffLines = append(v.diffLines, styled)
+	v.diffNums = append(v.diffNums, num)
+	v.diffHunk = append(v.diffHunk, hunk)
+}
+
+// addDiffSection appends the rows of one parsed diff.
+func (v *viewer) addDiffSection(d files.FileDiff, staged bool) {
+	if len(d.Hunks) == 0 {
+		for _, l := range d.Header {
+			if strings.HasPrefix(l, "Binary files") {
+				msg := "binary file changed"
+				v.addDiffRow(msg, sDim.Render(msg), 0, -1)
+			}
+		}
+		return
+	}
+	for hi, h := range d.Hunks {
+		idx := len(v.hunks)
+		start := len(v.diffPlain)
+		n := 0
+		if m := hunkRe.FindStringSubmatch(h.Header); m != nil {
+			n, _ = strconv.Atoi(m[1])
+		}
+		hdr := files.ExpandTabs(h.Header)
+		v.addDiffRow(hdr, sHunk.Render(hdr), 0, idx)
+		for _, raw := range h.Lines {
+			l := strings.TrimSuffix(raw, "\r")
+			if l != "" && strings.IndexByte("+- \\", l[0]) >= 0 {
+				l = l[:1] + files.ExpandTabs(l[1:])
+			} else {
+				l = files.ExpandTabs(l)
+			}
+			num := 0
+			styled := l
+			switch {
+			case strings.HasPrefix(l, "+"):
+				num, styled = n, sAdd.Render(l)
+				n++
+			case strings.HasPrefix(l, "-"):
+				styled = sDel.Render(l)
+			case strings.HasPrefix(l, `\`):
+				styled = sDim.Render(l)
+			default:
+				num = n
+				n++
+			}
+			v.addDiffRow(l, styled, num, idx)
+		}
+		v.hunks = append(v.hunks, diffHunk{staged: staged, patch: d.Patch(hi), start: start, end: len(v.diffPlain)})
+	}
+}
+
+// hunkAt is the hunk shown on row i (-1 for none).
+func (v *viewer) hunkAt(i int) int {
+	if !v.diff || i < 0 || i >= len(v.diffHunk) {
+		return -1
+	}
+	return v.diffHunk[i]
+}
+
+// countHunks counts the staged or unstaged hunks.
+func (v *viewer) countHunks(staged bool) int {
+	n := 0
+	for _, h := range v.hunks {
+		if h.staged == staged {
+			n++
+		}
+	}
+	return n
+}
+
+// hunkOrdinal is hunk i's position among the hunks of its kind.
+func (v *viewer) hunkOrdinal(i int) int {
+	n := 0
+	for j := 0; j < i; j++ {
+		if v.hunks[j].staged == v.hunks[i].staged {
+			n++
+		}
+	}
+	return n
+}
+
+// gotoHunk shows the n-th staged or unstaged hunk (clamped to the last one).
+func (v *viewer) gotoHunk(staged bool, n int) bool {
+	var list []int
+	for i, h := range v.hunks {
+		if h.staged == staged {
+			list = append(list, i)
+		}
+	}
+	if len(list) == 0 {
+		return false
+	}
+	v.showHunk(list[clamp(n, 0, len(list)-1)])
+	return true
+}
+
+// showHunk puts the cursor on hunk i's first change, with the hunk in view.
+func (v *viewer) showHunk(i int) {
+	h := v.hunks[i]
+	cur := h.start
+	for r := h.start + 1; r < h.end; r++ {
+		if l := v.diffPlain[r]; strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-") {
+			cur = r
+			break
+		}
+	}
+	v.cur = cur
+	if h.start < v.off || h.end > v.off+v.height {
+		v.off = max(0, h.start-2)
+	}
+	v.clamp()
+}
+
+// jumpHunk moves to the next (dir=1) or previous (dir=-1) hunk.
+func (v *viewer) jumpHunk(dir int) bool {
+	if len(v.hunks) == 0 {
+		return false
+	}
+	cur := v.hunkAt(v.cur)
+	next := -1
+	if dir > 0 {
+		for i, h := range v.hunks {
+			if i > cur && h.start > v.cur {
+				next = i
+				break
+			}
+		}
+	} else {
+		for i := len(v.hunks) - 1; i >= 0; i-- {
+			if i < cur || cur < 0 && v.hunks[i].end <= v.cur {
+				next = i
+				break
+			}
+		}
+	}
+	if next < 0 {
+		return false
+	}
+	v.showHunk(next)
+	return true
 }
 
 // showFileLine moves the diff cursor to the first diff line at or after
@@ -331,6 +449,7 @@ func (v *viewer) enterDiff() {
 	v.fileCur, v.fileOff = v.cur, v.off
 	v.diff = true
 	v.diffLines, v.diffPlain, v.diffNums = nil, nil, nil
+	v.hunks, v.diffHunk = nil, nil
 	v.diffNote = "Loading diff…"
 	v.cur, v.off = 0, 0
 	v.findMatches()
@@ -528,6 +647,16 @@ func (v *viewer) render(focused bool) []string {
 			num = sFaint.Render(num)
 		}
 		bar, tint := " ", ""
+		staged := false
+		if h := v.hunkAt(i); h >= 0 {
+			staged = v.hunks[h].staged
+			switch {
+			case staged && i == v.hunks[h].start:
+				bar = sAdd.Render("✓")
+			case h == v.hunkAt(v.cur) && focused:
+				bar = sAccent.Render("▎")
+			}
+		}
 		if !v.diff {
 			switch v.marks[i+1] {
 			case markAdd:
@@ -549,7 +678,7 @@ func (v *viewer) render(focused bool) []string {
 			body = highlightRanges(v.plainLine(i), h, c)
 		} else if v.diff {
 			body = v.diffLines[i]
-			if st, ok := diffBg(v.diffPlain[i]); ok {
+			if st, ok := diffBg(v.diffPlain[i]); ok && !staged {
 				// full-width tinted row; cut the plain text so the tint spans the pane
 				bg := st
 				pl := ansi.Cut(v.diffLines[i], v.xoff, v.xoff+avail)

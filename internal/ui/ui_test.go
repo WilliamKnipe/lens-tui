@@ -37,7 +37,7 @@ func TestDiffLineNumbers(t *testing.T) {
 	v := &viewer{height: 10, width: 80}
 	out := "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
 	v.diff = true
-	v.setDiff(out, nil, true)
+	v.setDiff(out, "", nil, true)
 	wantNums := []int{0, 1, 0, 2, 3}
 	if len(v.diffNums) != len(wantNums) {
 		t.Fatalf("nums = %v", v.diffNums)
@@ -615,9 +615,13 @@ func TestClickChangedOpensDiff(t *testing.T) {
 	m := New(t.TempDir(), "")
 	m.git.OK = true
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
-	m.tree.setStatus(map[string]string{"x.go": "M"})
+	m.tree.setStatus(files.Status{Files: map[string]string{"x.go": "M"}, Unstaged: map[string]string{"x.go": "M"}})
 	m.tree.toggleChanged()
-	m.handleClick(tea.Mouse{X: 2, Y: 1, Button: tea.MouseLeft})
+	m.handleClick(tea.Mouse{X: 2, Y: 1, Button: tea.MouseLeft}) // the "Changes" title
+	if m.wantRel != "" {
+		t.Fatal("clicking a section title opened a file")
+	}
+	m.handleClick(tea.Mouse{X: 2, Y: 2, Button: tea.MouseLeft})
 	if !m.wantDiff || m.wantRel != "x.go" {
 		t.Fatalf("click: wantDiff=%v wantRel=%q", m.wantDiff, m.wantRel)
 	}
@@ -627,7 +631,7 @@ func TestClickChangedOpensDiff(t *testing.T) {
 // marker, so indentation matches the file view.
 func TestDiffTabsMatchFile(t *testing.T) {
 	v := &viewer{height: 10, width: 80, diff: true}
-	v.setDiff("@@ -1,2 +1,2 @@\n \tkeep\n-\told\n+\tnew\n", nil, false)
+	v.setDiff("@@ -1,2 +1,2 @@\n \tkeep\n-\told\n+\tnew\n", "", nil, false)
 	want := files.SplitLines("\tx\n")[0][:4] // the file view's indent
 	for _, l := range v.diffPlain[1:] {
 		if l[1:5] != want || l[5] == ' ' {
@@ -662,7 +666,7 @@ func TestDeletedFileInChangedList(t *testing.T) {
 			m.Update(dm)
 		}
 	}
-	if len(m.tree.rows) != 1 || m.view.rel != "gone.txt" || !m.view.diff {
+	if len(m.tree.rows) != 2 || m.view.rel != "gone.txt" || !m.view.diff {
 		t.Fatalf("rows=%d rel=%q diff=%v", len(m.tree.rows), m.view.rel, m.view.diff)
 	}
 	out := ansi.Strip(strings.Join(m.view.render(true), "\n"))

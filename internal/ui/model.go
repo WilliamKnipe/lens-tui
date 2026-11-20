@@ -36,6 +36,8 @@ const (
 	modeFind        // "/" in-file search
 	modeGoto        // ":" go to line
 	modeHelp        // "?"
+	modeCommit      // "c" commit popup
+	modePush        // "P" unpushed commits / push popup
 )
 
 // Polling slows down when `git status` is slow, so huge repos don't keep
@@ -76,10 +78,12 @@ type (
 		styled []string
 	}
 	diffMsg struct {
-		rel   string
-		out   string
-		err   error
-		first bool
+		rel      string
+		out      string // against HEAD, for the file view's change marks
+		unstaged string
+		staged   string
+		err      error
+		first    bool
 	}
 	pollMsg       struct{}
 	pollResultMsg struct {
@@ -91,6 +95,8 @@ type (
 		missing bool
 		gitTook time.Duration
 		texts   map[string][]string // new contents of changed files edited since their last snapshot
+		once    bool                // a one-off refresh: don't schedule the next poll
+		gen     int                 // statusGen when the poll started
 	}
 	committedMsg  struct{ files []files.Committed }
 	flashClearMsg struct{ seq int }
@@ -142,6 +148,11 @@ type Model struct {
 	snapMod map[string]time.Time
 
 	committed []files.Committed // files from the latest commits, newest first
+
+	reviewNext *reviewNext // where to go once the diff reloads after staging
+	statusGen  int         // bumped by every stage/commit/push; older polls are dropped
+	commit     *commitPopup
+	push       *pushPopup
 }
 
 const (
@@ -163,10 +174,12 @@ func New(root, openFile string) *Model {
 		view:      &viewer{},
 		finder:    newFinder(),
 		search:    newSearcher(),
+		commit:    newCommitPopup(),
+		push:      &pushPopup{},
 		prompt:    p,
 		showTree:  true,
 		startFile: openFile,
-		status:    files.Status{Files: map[string]string{}},
+		status:    files.Status{Files: map[string]string{}, Staged: map[string]string{}, Unstaged: map[string]string{}},
 	}
 	m.pollEvery = pollFast
 	debug.Logf("start root=%s git=%v term=%s", root, m.git.OK, os.Getenv("TERM_PROGRAM"))
@@ -258,9 +271,16 @@ func (m *Model) diffCmd(first bool) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 		out, err := g.Diff(rel, untracked)
+		msg := diffMsg{rel: rel, out: out, err: err, first: first}
+		if err == nil {
+			msg.unstaged, msg.err = g.DiffUnstaged(rel, untracked)
+		}
+		if msg.err == nil && !untracked {
+			msg.staged, msg.err = g.DiffStaged(rel)
+		}
 		// refreshes are logged only when slow; opening a diff always is
 		debug.Since("git diff", start, 300*time.Millisecond, !first, rel)
-		return diffMsg{rel, out, err, first}
+		return msg
 	}
 }
 
@@ -283,14 +303,14 @@ func (m *Model) changesCmd() tea.Cmd {
 // pollCmd checks git status and the open file's mtime. The next poll is
 // scheduled only after this one returns, so slow repos never pile up.
 func (m *Model) pollCmd() tea.Cmd {
-	g, root, rel := m.git, m.root, m.view.rel
+	g, root, rel, gen := m.git, m.root, m.view.rel, m.statusGen
 	snapMod := make(map[string]time.Time, len(m.snapMod))
 	for p, t := range m.snapMod {
 		snapMod[p] = t
 	}
 	return func() tea.Msg {
 		start := time.Now()
-		r := pollResultMsg{status: g.Status(), rel: rel}
+		r := pollResultMsg{status: g.Status(), rel: rel, gen: gen}
 		r.gitTook = debug.Since("git status", start, 100*time.Millisecond, true, fmt.Sprintf("%d changed", len(r.status.Files)))
 		r.mods = make(map[string]time.Time, len(r.status.Files))
 		for p, c := range r.status.Files {
@@ -603,7 +623,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diffMsg:
 		if msg.rel == m.view.rel && m.view.diff {
-			m.view.setDiff(msg.out, msg.err, msg.first)
+			m.view.setDiff(msg.unstaged, msg.staged, msg.err, msg.first)
 			if msg.err == nil && m.status.Files[msg.rel] != "?" && m.status.Files[msg.rel] != "A" {
 				m.view.marks = changeMarks(msg.out)
 			} else {
@@ -613,8 +633,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.view.showFileLine(m.followLine)
 				m.followLine = 0
 			}
+			return m, m.afterReviewDiff()
 		}
 		return m, nil
+
+	case gitOpMsg:
+		return m, m.handleGitOp(msg)
+
+	case commitDataMsg:
+		m.commit.setData(msg)
+		return m, m.commitPreview()
+
+	case commitPreviewMsg:
+		m.commit.setPreview(msg)
+		return m, nil
+
+	case commitDoneMsg:
+		return m, m.handleCommitDone(msg)
+
+	case pushLogMsg:
+		m.push.setLog(msg)
+		return m, m.pushStatCmd()
+
+	case pushStatMsg:
+		m.push.setStat(msg)
+		return m, nil
+
+	case pushDoneMsg:
+		return m, m.handlePushDone(msg)
 
 	case pollMsg:
 		return m, m.pollCmd()
@@ -664,12 +710,19 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		debug.Logf("poll interval %s -> %s (git status took %s)", m.pollEvery, next, r.gitTook.Round(time.Millisecond))
 		m.pollEvery = next
 	}
-	cmds := []tea.Cmd{tea.Tick(m.pollEvery, func(time.Time) tea.Msg { return pollMsg{} })}
+	var cmds []tea.Cmd
+	if !r.once {
+		cmds = append(cmds, tea.Tick(m.pollEvery, func(time.Time) tea.Msg { return pollMsg{} }))
+	}
+	if r.gen != m.statusGen {
+		// started before a stage/commit/push: its status is out of date
+		return tea.Batch(cmds...)
+	}
 	start := time.Now()
 	defer func() { debug.Since("tree refresh", start, 50*time.Millisecond, true, "") }()
-	oldCode, oldBranch := m.status.Files[m.view.rel], m.status.Branch
+	oldCode, oldBranch := gitState(m.status, m.view.rel), m.status.Branch
 	m.status = r.status
-	m.tree.setStatus(r.status.Files)
+	m.tree.setStatus(r.status)
 	m.tree.refresh()
 
 	// files edited since the last poll; the newest one is followed
@@ -722,7 +775,7 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		case !r.missing && (!r.mod.Equal(m.view.mod) || r.size != m.view.size):
 			m.followJump = m.follow
 			cmds = append(cmds, m.loadCmd(r.rel, 0))
-		case oldCode == r.status.Files[r.rel] && oldBranch == r.status.Branch:
+		case oldCode == gitState(r.status, r.rel) && oldBranch == r.status.Branch:
 			// git state unchanged: no need to diff again
 		case m.view.diff:
 			// e.g. committed, reverted or switched branch without touching the file
@@ -734,6 +787,12 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// gitState sums up rel's status, staged and unstaged, so a change on either
+// side (e.g. `git add` in a shell) reloads the diff.
+func gitState(st files.Status, rel string) string {
+	return st.Files[rel] + "/" + st.Staged[rel] + "/" + st.Unstaged[rel]
+}
+
 func (m *Model) updateInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	switch m.mode {
@@ -743,6 +802,8 @@ func (m *Model) updateInput(msg tea.Msg) tea.Cmd {
 		m.search.input, cmd = m.search.input.Update(msg)
 	case modeFind, modeGoto:
 		m.prompt, cmd = m.prompt.Update(msg)
+	case modeCommit:
+		m.commit.input, cmd = m.commit.input.Update(msg)
 	}
 	return cmd
 }
@@ -759,6 +820,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.keySearch(msg)
 	case modeFind, modeGoto:
 		return m.keyPrompt(msg)
+	case modeCommit:
+		return m.keyCommit(msg)
+	case modePush:
+		return m.keyPush(msg)
 	case modeHelp:
 		m.mode = modeNormal
 		return nil
@@ -778,6 +843,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.openFinder()
 	case "ctrl+f", "super+shift+f":
 		return m.openSearch()
+	case "c":
+		return m.openCommit()
+	case "P", "super+d":
+		return m.openPush()
 	case "?":
 		m.mode = modeHelp
 		return nil
@@ -850,6 +919,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return tea.Batch(append(cmds, m.setFlash("refreshed"))...)
 	}
 
+	if cmd, ok := m.keyReview(k); ok {
+		return cmd
+	}
 	if m.focus == focusTree {
 		return m.keyTree(k)
 	}
@@ -989,7 +1061,7 @@ func (m *Model) cycleFile(d int) tea.Cmd {
 		sorted = false
 		list = nil
 		for _, r := range t.rows {
-			if !r.isDir {
+			if !r.isDir && !r.header && !slices.Contains(list, r.rel) {
 				list = append(list, r.rel)
 			}
 		}
@@ -1317,6 +1389,10 @@ func (m *Model) wheelOverlay(d int) {
 		m.finder.move(d)
 	case modeSearch:
 		m.search.move(d)
+	case modeCommit:
+		m.commit.wheel(d)
+	case modePush:
+		m.push.move(d)
 	}
 }
 
@@ -1334,8 +1410,11 @@ func (m *Model) handleClick(ms tea.Mouse) tea.Cmd {
 		if i >= len(m.tree.rows) {
 			return nil
 		}
-		m.tree.cursor = i
 		n := m.tree.rows[i]
+		if n.header {
+			return nil
+		}
+		m.tree.cursor = i
 		if n.isDir {
 			m.tree.toggle()
 			return nil
@@ -1390,7 +1469,8 @@ func (m *Model) render() string {
 		b := newBar(m.focus == focusTree)
 		var right string
 		if m.tree.changed {
-			right = b.chip.Render("CHANGED")
+			done, total := reviewProgress(m.status)
+			right = b.chip.Render(fmt.Sprintf("REVIEW %d/%d", done, total))
 		}
 		title := b.fit(b.base.Render(" ")+b.bold.Render(m.name), right, tw)
 		treeLines = append([]string{title}, m.tree.render(tw, m.focus == focusTree && m.mode == modeNormal)...)
@@ -1418,6 +1498,14 @@ func (m *Model) render() string {
 		w := min(140, m.width-6)
 		h := min(24, m.height-4)
 		return overlay(base, m.search.view(w, h), m.width, m.height, (m.width-w-4)/2, 1)
+	case modeCommit:
+		w := min(140, m.width-6)
+		h := min(30, m.height-4)
+		return overlay(base, m.commit.view(w, h, m.status), m.width, m.height, (m.width-w-4)/2, 1)
+	case modePush:
+		w := min(110, m.width-6)
+		h := min(28, m.height-4)
+		return overlay(base, m.push.view(w, h, m.status), m.width, m.height, (m.width-w-4)/2, 1)
 	case modeHelp:
 		h := helpBox()
 		return overlay(base, h, m.width, m.height, max(0, (m.width-lipgloss.Width(h))/2), max(0, (m.height-lipgloss.Height(h))/2))
@@ -1452,6 +1540,10 @@ func (m *Model) statusBar() string {
 			left += sDim.Render(fmt.Sprintf("/%s  %d/%d  n/N next/prev  esc clear", m.view.query, m.view.mi+1, len(m.view.matches)))
 		case m.view.query != "":
 			left += sDim.Render(fmt.Sprintf("/%s  no matches", m.view.query))
+		case m.view.diff && m.focus == focusViewer:
+			left += sDim.Render("s stage hunk · S file · u unstage · { } hunk · c commit · d back")
+		case m.tree.changed && m.focus == focusTree:
+			left += sDim.Render("s stage file · u unstage · enter diff · c commit · d all files")
 		case m.view.diff:
 			left += sDim.Render("enter jump to line · d back to file")
 		default:
@@ -1467,6 +1559,9 @@ func (m *Model) statusBar() string {
 		right = append(right, "⎇ "+m.status.Branch)
 	}
 	r := sDim.Render(strings.Join(right, "  ")) + " "
+	if a := m.status.Ahead; a > 0 {
+		r = sAccent.Render(fmt.Sprintf("↑%d", a)) + sDim.Render(" P push  ") + r
+	}
 	rw := lipgloss.Width(r)
 	return fit(left, m.width-rw) + r
 }
@@ -1481,7 +1576,7 @@ func helpBox() string {
 		{"j k ↑ ↓", "scroll (sidebar: move)"},
 		{"J K ⇧↑ ⇧↓", "move cursor only"},
 		{"H M L", "cursor to top / middle / bottom"},
-		{"{ }", "previous / next block"},
+		{"{ }", "previous / next block (in diff: hunk)"},
 		{"enter", "open file / toggle folder"},
 		{"l space", "preview file, stay in sidebar"},
 		{"h", "collapse folder / go to parent"},
@@ -1490,7 +1585,11 @@ func helpBox() string {
 		{"space pgdn", "page down (pgup: up)"},
 		{"/  n N", "search in file, next / prev"},
 		{":", "go to line"},
-		{"d", "toggle git diff (enter jumps to line); in sidebar: changed files only"},
+		{"d", "toggle git diff (enter jumps to line); in sidebar: review changed files"},
+		{"s  S", "stage hunk / file (in diff or review sidebar)"},
+		{"u  U", "unstage hunk / file"},
+		{"c", "commit: message + staged files"},
+		{"P", "unpushed commits / push"},
 		{"y  Y", "copy path / path:line"},
 		{"f", "follow mode: open files as they change"},
 		{"r", "refresh"},

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -12,15 +13,25 @@ import (
 // Git wraps git commands for one root directory. OK is false when the root
 // is not inside a git repository; every method then returns empty results.
 type Git struct {
-	Root   string
-	Prefix string // root's path inside the repo, e.g. "sub/dir/" ("" at the top)
-	OK     bool
+	Root      string
+	Prefix    string // root's path inside the repo, e.g. "sub/dir/" ("" at the top)
+	OK        bool
+	HasRemote bool // the repo has at least one remote
 }
 
 // Status is a snapshot of `git status`.
 type Status struct {
-	Branch string
-	Files  map[string]string // root-relative path -> M, A, D, R, U or ?
+	Branch   string
+	Files    map[string]string // root-relative path -> M, A, D, R, U or ? (index and worktree combined)
+	Staged   map[string]string // changes in the index: M, A, D or R
+	Unstaged map[string]string // changes in the worktree: M, D, U or ? (untracked)
+	Upstream bool              // the branch tracks a remote branch
+	Ahead    int               // commits not pushed (with no upstream: not on any remote)
+	Behind   int
+}
+
+func emptyStatus() Status {
+	return Status{Files: map[string]string{}, Staged: map[string]string{}, Unstaged: map[string]string{}}
 }
 
 func OpenGit(root string) Git {
@@ -28,29 +39,41 @@ func OpenGit(root string) Git {
 	if err != nil {
 		return Git{Root: root}
 	}
-	return Git{Root: root, Prefix: strings.TrimSpace(string(out)), OK: true}
+	g := Git{Root: root, Prefix: strings.TrimSpace(string(out)), OK: true}
+	if rem, err := gitCmd(root, "remote"); err == nil && strings.TrimSpace(string(rem)) != "" {
+		g.HasRemote = true
+	}
+	return g
 }
 
 func (g Git) Status() Status {
 	if !g.OK {
-		return Status{Files: map[string]string{}}
+		return emptyStatus()
 	}
 	out, err := gitCmd(g.Root, "status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all")
 	if err != nil {
-		return Status{Files: map[string]string{}}
+		return emptyStatus()
 	}
-	return parseStatus(out, g.Prefix)
+	st := parseStatus(out, g.Prefix)
+	if !st.Upstream && g.HasRemote {
+		// no upstream yet: count the commits that no remote has
+		if n, err := gitCmd(g.Root, "rev-list", "--count", "HEAD", "--not", "--remotes"); err == nil {
+			st.Ahead, _ = strconv.Atoi(strings.TrimSpace(string(n)))
+		}
+	}
+	return st
 }
 
 // parseStatus reads `git status --porcelain=v1 -z --branch`. Porcelain paths
 // are relative to the repo top, so they are trimmed to be relative to root.
 func parseStatus(out []byte, prefix string) Status {
-	st := Status{Files: map[string]string{}}
+	st := emptyStatus()
 	parts := strings.Split(string(out), "\x00")
 	for i := 0; i < len(parts); i++ {
 		e := parts[i]
 		if strings.HasPrefix(e, "## ") {
 			st.Branch = parseBranch(e[3:])
+			st.Upstream, st.Ahead, st.Behind = parseTracking(e[3:])
 			continue
 		}
 		if len(e) < 4 {
@@ -65,8 +88,57 @@ func parseStatus(out []byte, prefix string) Status {
 			continue
 		}
 		st.Files[rel] = statusCode(x, y)
+		switch code := st.Files[rel]; {
+		case code == "?" || code == "U":
+			st.Unstaged[rel] = code
+		default:
+			if c := sideCode(x); c != "" {
+				st.Staged[rel] = c
+			}
+			if c := sideCode(y); c != "" {
+				st.Unstaged[rel] = c
+			}
+		}
 	}
 	return st
+}
+
+// sideCode maps one porcelain column (index or worktree) to a status letter,
+// "" when that side has no change.
+func sideCode(c byte) string {
+	switch c {
+	case 'M', 'T':
+		return "M"
+	case 'A', 'C':
+		return "A"
+	case 'D':
+		return "D"
+	case 'R':
+		return "R"
+	}
+	return ""
+}
+
+var trackRe = regexp.MustCompile(`(ahead|behind) (\d+)`)
+
+// parseTracking reads the upstream part of the porcelain branch line,
+// e.g. "main...origin/main [ahead 3, behind 1]".
+func parseTracking(s string) (upstream bool, ahead, behind int) {
+	if !strings.Contains(s, "...") {
+		return false, 0, 0
+	}
+	if strings.Contains(s, "[gone]") {
+		return false, 0, 0
+	}
+	for _, m := range trackRe.FindAllStringSubmatch(s, -1) {
+		n, _ := strconv.Atoi(m[2])
+		if m[1] == "ahead" {
+			ahead = n
+		} else {
+			behind = n
+		}
+	}
+	return true, ahead, behind
 }
 
 func parseBranch(s string) string {

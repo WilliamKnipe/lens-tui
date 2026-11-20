@@ -5,8 +5,13 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/williamknipe/lens-tui/internal/files"
 )
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // hiddenNames never appear in the sidebar.
 var hiddenNames = map[string]bool{".git": true, ".DS_Store": true}
@@ -20,6 +25,11 @@ type node struct {
 	depth  int
 	parent *node
 	kids   []*node
+
+	// changed view only
+	header bool   // a section title ("Changes (3)"), never selected
+	staged bool   // the row is in the Staged section
+	mark   string // status letter for the row's section
 }
 
 // tree is the expandable sidebar. Directories are read lazily on expand.
@@ -34,6 +44,8 @@ type tree struct {
 
 	changed     bool    // show only changed files, as a flat list
 	changedRows []*node // flat nodes for the changed list
+	staged      map[string]string
+	unstaged    map[string]string
 }
 
 func newTree(root string) *tree {
@@ -85,25 +97,7 @@ func (t *tree) load(n *node) {
 func (t *tree) rebuild() {
 	t.rows = t.rows[:0]
 	if t.changed {
-		old := make(map[string]*node, len(t.changedRows))
-		for _, n := range t.changedRows {
-			old[n.rel] = n
-		}
-		t.changedRows = t.changedRows[:0]
-		for p, c := range t.marks {
-			if c == "•" { // a folder holding changes
-				continue
-			}
-			n := old[p]
-			if n == nil {
-				n = &node{name: p, rel: p}
-			}
-			t.changedRows = append(t.changedRows, n)
-		}
-		sort.Slice(t.changedRows, func(i, j int) bool { return t.changedRows[i].rel < t.changedRows[j].rel })
-		t.rows = append(t.rows, t.changedRows...)
-		t.cursor = clamp(t.cursor, 0, len(t.rows)-1)
-		t.ensureVisible()
+		t.rebuildChanged()
 		return
 	}
 	var walk func(n *node)
@@ -118,6 +112,62 @@ func (t *tree) rebuild() {
 	walk(t.top)
 	t.cursor = clamp(t.cursor, 0, len(t.rows)-1)
 	t.ensureVisible()
+}
+
+// rebuildChanged lists changed files in two sections: "Changes" (still to
+// review) and "Staged". A partly staged file is in both.
+func (t *tree) rebuildChanged() {
+	old := make(map[string]*node, len(t.changedRows))
+	for _, n := range t.changedRows {
+		if !n.header {
+			old[rowKey(n.staged, n.rel)] = n
+		}
+	}
+	t.changedRows = t.changedRows[:0]
+	section := func(title string, staged bool, m map[string]string) {
+		if len(m) == 0 {
+			return
+		}
+		t.changedRows = append(t.changedRows, &node{name: title + " (" + itoa(len(m)) + ")", header: true, staged: staged})
+		paths := make([]string, 0, len(m))
+		for p := range m {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		for _, p := range paths {
+			n := old[rowKey(staged, p)]
+			if n == nil {
+				n = &node{name: p, rel: p, staged: staged}
+			}
+			n.mark = m[p]
+			t.changedRows = append(t.changedRows, n)
+		}
+	}
+	section("Changes", false, t.unstaged)
+	section("Staged", true, t.staged)
+	t.rows = append(t.rows, t.changedRows...)
+	t.cursor = clamp(t.cursor, 0, len(t.rows)-1)
+	t.skipHeader(1)
+	t.ensureVisible()
+}
+
+func rowKey(staged bool, rel string) string {
+	if staged {
+		return "s:" + rel
+	}
+	return "u:" + rel
+}
+
+// skipHeader moves the cursor off a section title, in direction d first.
+func (t *tree) skipHeader(d int) {
+	for _, dir := range []int{d, -d} {
+		for i := t.cursor; i >= 0 && i < len(t.rows); i += dir {
+			if !t.rows[i].header {
+				t.cursor = i
+				return
+			}
+		}
+	}
 }
 
 // refresh re-reads every open directory, keeping the cursor on the same path.
@@ -143,7 +193,7 @@ func (t *tree) refresh() {
 }
 
 func (t *tree) selected() *node {
-	if t.cursor < 0 || t.cursor >= len(t.rows) {
+	if t.cursor < 0 || t.cursor >= len(t.rows) || t.rows[t.cursor].header {
 		return nil
 	}
 	return t.rows[t.cursor]
@@ -151,7 +201,7 @@ func (t *tree) selected() *node {
 
 func (t *tree) selectPath(rel string) bool {
 	for i, r := range t.rows {
-		if r.rel == rel {
+		if r.rel == rel && !r.header {
 			t.cursor = i
 			t.ensureVisible()
 			return true
@@ -162,6 +212,7 @@ func (t *tree) selectPath(rel string) bool {
 
 func (t *tree) move(d int) {
 	t.cursor = clamp(t.cursor+d, 0, len(t.rows)-1)
+	t.skipHeader(d)
 	t.ensureVisible()
 }
 
@@ -170,6 +221,7 @@ func (t *tree) scroll(d int) {
 	t.offset = clamp(t.offset+d, 0, len(t.rows)-t.height)
 	t.cursor = clamp(t.cursor, t.offset, t.offset+t.height-1)
 	t.cursor = clamp(t.cursor, 0, len(t.rows)-1)
+	t.skipHeader(d)
 }
 
 func (t *tree) ensureVisible() {
@@ -240,9 +292,10 @@ func (t *tree) reveal(rel string) {
 }
 
 // setStatus stores git markers. Parent directories of changed files get a dot.
-func (t *tree) setStatus(files map[string]string) {
-	marks := make(map[string]string, len(files))
-	for p, c := range files {
+func (t *tree) setStatus(st files.Status) {
+	t.staged, t.unstaged = st.Staged, st.Unstaged
+	marks := make(map[string]string, len(st.Files))
+	for p, c := range st.Files {
 		marks[p] = c
 		for d := path.Dir(p); d != "." && d != "/"; d = path.Dir(d) {
 			if _, ok := marks[d]; ok {
@@ -288,6 +341,10 @@ func (t *tree) render(w int, focused bool) []string {
 			continue
 		}
 		n := t.rows[i]
+		if n.header {
+			out = append(out, fit(" "+sDim.Bold(true).Render(n.name), w))
+			continue
+		}
 		indent := strings.Repeat("  ", n.depth)
 		icon := "  "
 		if n.isDir {
@@ -297,6 +354,9 @@ func (t *tree) render(w int, focused bool) []string {
 			}
 		}
 		mark := t.marks[n.rel]
+		if t.changed {
+			mark = n.mark
+		}
 		markW := 0
 		if mark != "" {
 			markW = 2
