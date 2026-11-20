@@ -51,6 +51,8 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 
 The mouse works too: click to open, wheel to scroll.
 
+<img width="985" height="424" alt="Screenshot 2026-11-20 at 12 27 53" src="https://github.com/user-attachments/assets/843462a8-5db6-4b52-b015-e5c2d1eadcef" />
+
 ## Cmd+P in Ghostty
 
 Ghostty 1.4 doesn't use Cmd+P itself, and lens turns on the kitty keyboard protocol, so Ghostty should pass
