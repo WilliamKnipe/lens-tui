@@ -169,27 +169,14 @@ func (g Git) CountLines(rel string) int {
 	return n
 }
 
-// Commit commits the index with msg and returns the new short hash.
-func (g Git) Commit(msg string, amend bool) (string, error) {
-	args := []string{"commit", "-F", "-"}
-	if amend {
-		args = append(args, "--amend")
-	}
-	if _, err := g.run(msg, args...); err != nil {
+// Commit makes a new commit from the index with msg and returns its short
+// hash. lens only ever adds commits: it never amends or rewrites history.
+func (g Git) Commit(msg string) (string, error) {
+	if _, err := g.run(msg, "commit", "-F", "-"); err != nil {
 		return "", err
 	}
 	h, _ := g.run("", "rev-parse", "--short", "HEAD")
 	return strings.TrimSpace(h), nil
-}
-
-// LastCommit returns HEAD's short hash and full message ("" when no commit).
-func (g Git) LastCommit() (hash, msg string) {
-	out, err := g.run("", "log", "-1", "--format=%h%x00%B")
-	if err != nil {
-		return "", ""
-	}
-	h, m, _ := strings.Cut(out, "\x00")
-	return h, strings.TrimSpace(m)
 }
 
 // LogLine is one line of `git log --graph`: graph art plus, on commit lines,

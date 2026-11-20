@@ -114,8 +114,8 @@ line counts, then the files that won't be committed, and a diff preview of the s
 
 - `enter` commits. If **nothing is staged**, the popup says so and `enter` commits every change
   (`git add -A && git commit`), which is the quick path when you're confident.
+- Every commit is a new commit on top. lens never amends, squashes or otherwise rewrites history.
 - `tab` moves to the file list: `j` `k` select (the preview follows), `space` stages or unstages a file.
-- `ctrl+a` toggles amend (it fills in the last commit's message).
 - `esc` closes it and keeps the message as a draft. Commit hooks run as usual; if one fails, its output
   shows in the popup and your message stays.
 

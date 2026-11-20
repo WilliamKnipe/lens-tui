@@ -303,3 +303,28 @@ func TestNextFileSkipsStaged(t *testing.T) {
 		t.Fatalf("rel=%q flash=%q", m.view.rel, m.flash)
 	}
 }
+
+// TestCommitNeverAmends: ctrl+a is just "start of line" in the message, and
+// a commit always adds a new commit on top of HEAD.
+func TestCommitNeverAmends(t *testing.T) {
+	dir := gitRepo(t, map[string]string{"a.txt": "a\n"})
+	before := strings.TrimSpace(gitIn(t, dir, "rev-parse", "HEAD"))
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a2\n"), 0o644)
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	drive(m, m.pollCmd())
+
+	press(m, "c")
+	for _, r := range "bc" {
+		press(m, string(r))
+	}
+	drive(m, m.handleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl}))
+	press(m, "a")
+	if v := m.commit.input.Value(); v != "abc" {
+		t.Fatalf("message = %q, want ctrl+a to go to the line start", v)
+	}
+	press(m, "enter")
+	if parent := strings.TrimSpace(gitIn(t, dir, "rev-parse", "HEAD~1")); parent != before {
+		t.Fatalf("HEAD~1 = %s, want the old HEAD %s (history was rewritten)", parent, before)
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -32,10 +31,6 @@ type commitEntry struct {
 type commitPopup struct {
 	input     textarea.Model
 	focusList bool
-	amend     bool
-	lastHash  string
-	lastMsg   string
-	draft     string // the message before amend filled in the last one
 
 	status  files.Status // as of the last reload
 	entries []commitEntry
@@ -56,8 +51,6 @@ type (
 		status   files.Status
 		staged   map[string]files.Stat
 		unstaged map[string]files.Stat
-		lastHash string
-		lastMsg  string
 	}
 	commitPreviewMsg struct {
 		rel    string
@@ -66,7 +59,6 @@ type (
 	}
 	commitDoneMsg struct {
 		hash  string
-		amend bool
 		ahead int
 		err   error
 	}
@@ -78,7 +70,6 @@ func newCommitPopup() *commitPopup {
 	in.ShowLineNumbers = false
 	in.Placeholder = "Commit message: first line is the subject"
 	in.CharLimit = 0
-	in.KeyMap.LineStart = key.NewBinding(key.WithKeys("home")) // ctrl+a toggles amend
 	st := in.Styles()
 	st.Focused.CursorLine = lipgloss.NewStyle()
 	st.Focused.Placeholder = sDim
@@ -105,7 +96,6 @@ func (c *commitPopup) reload(g files.Git) tea.Cmd {
 				msg.unstaged[p] = files.Stat{Add: g.CountLines(p)}
 			}
 		}
-		msg.lastHash, msg.lastMsg = g.LastCommit()
 		return msg
 	}
 }
@@ -115,7 +105,7 @@ func (c *commitPopup) setData(msg commitDataMsg) {
 	if e, ok := c.selected(); ok {
 		keepRel, keepStaged = e.rel, e.staged
 	}
-	c.status, c.lastHash, c.lastMsg, c.loaded = msg.status, msg.lastHash, msg.lastMsg, true
+	c.status, c.loaded = msg.status, true
 	c.entries = c.entries[:0]
 	section := func(title string, staged bool, m map[string]string, stats map[string]files.Stat) {
 		if len(m) == 0 {
@@ -222,21 +212,6 @@ func (c *commitPopup) subject() string {
 	return s
 }
 
-func (c *commitPopup) toggleAmend() {
-	c.amend = !c.amend
-	val := strings.TrimSpace(c.input.Value())
-	if c.amend {
-		if val == "" || val == strings.TrimSpace(c.draft) {
-			c.draft = c.input.Value()
-			c.input.SetValue(c.lastMsg)
-		}
-		return
-	}
-	if val == strings.TrimSpace(c.lastMsg) {
-		c.input.SetValue(c.draft)
-	}
-}
-
 // ---- model side ----
 
 func (m *Model) openCommit() tea.Cmd {
@@ -269,9 +244,6 @@ func (m *Model) keyCommit(msg tea.KeyPressMsg) tea.Cmd {
 			return m.commitPreview()
 		}
 		return c.input.Focus()
-	case "ctrl+a":
-		c.toggleAmend()
-		return nil
 	case "enter":
 		return m.submitCommit()
 	case "ctrl+d", "pgdown":
@@ -331,20 +303,20 @@ func (m *Model) submitCommit() tea.Cmd {
 		return nil
 	case !c.loaded:
 		return nil
-	case !c.amend && len(c.status.Files) == 0:
+	case len(c.status.Files) == 0:
 		c.err = "nothing to commit"
 		return nil
 	}
 	c.err, c.busy = "", true
-	g, amend, all := m.git, c.amend, c.nothingStaged() && !c.amend
+	g, all := m.git, c.nothingStaged()
 	return func() tea.Msg {
 		if all {
 			if err := g.StageAll(); err != nil {
 				return commitDoneMsg{err: err}
 			}
 		}
-		hash, err := g.Commit(text+"\n", amend)
-		return commitDoneMsg{hash: hash, amend: amend, ahead: g.Status().Ahead, err: err}
+		hash, err := g.Commit(text + "\n")
+		return commitDoneMsg{hash: hash, ahead: g.Status().Ahead, err: err}
 	}
 }
 
@@ -356,14 +328,9 @@ func (m *Model) handleCommitDone(msg commitDoneMsg) tea.Cmd {
 		return m.handleGitOp(gitOpMsg{op: "commit"}) // a failed commit-all may have staged files
 	}
 	c.input.SetValue("")
-	c.draft, c.amend = "", false
 	c.input.Blur()
 	m.mode = modeNormal
-	verb := "committed"
-	if msg.amend {
-		verb = "amended"
-	}
-	flash := verb + " " + msg.hash
+	flash := "committed " + msg.hash
 	if msg.ahead > 0 {
 		flash += fmt.Sprintf(" · ↑%d unpushed · P to push", msg.ahead)
 	}
@@ -380,8 +347,6 @@ func (c *commitPopup) view(w, h int, st files.Status) string {
 	title := sAccent.Bold(true).Render("Commit") + sDim.Render(" to ") + sBold.Render(st.Branch)
 	var right string
 	switch {
-	case c.amend:
-		title = sAccent.Bold(true).Render("Amend ") + sBold.Render(c.lastHash) + sDim.Render(" on "+st.Branch)
 	case !c.loaded:
 		right = sDim.Render("loading…")
 	case len(c.status.Files) == 0:
@@ -437,7 +402,7 @@ func (c *commitPopup) view(w, h int, st files.Status) string {
 			lines = append(lines, sDel.Render(l))
 		}
 	}
-	keys := "enter commit · tab files · ctrl+a amend · esc close (keeps draft)"
+	keys := "enter commit · tab files · esc close (keeps draft)"
 	if c.focusList {
 		keys = "space stage/unstage · j/k select · ctrl+d/u scroll diff · enter commit · esc"
 	}

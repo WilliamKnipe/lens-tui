@@ -150,17 +150,17 @@ func TestStageCommitFlow(t *testing.T) {
 	if err := g.StageAll(); err != nil {
 		t.Fatal(err)
 	}
-	hash, err := g.Commit("second\n\nbody", false)
+	hash, err := g.Commit("second\n\nbody")
 	if err != nil || hash == "" {
 		t.Fatalf("commit: %q %v", hash, err)
 	}
-	if h, msg := g.LastCommit(); h != hash || msg != "second\n\nbody" {
-		t.Errorf("last commit = %q %q", h, msg)
+	if out, _ := g.run("", "log", "-1", "--format=%h%n%B"); strings.TrimSpace(out) != hash+"\nsecond\n\nbody" {
+		t.Errorf("last commit = %q", out)
 	}
 	if st := g.Status(); len(st.Files) != 0 {
 		t.Errorf("still changed: %v", st.Files)
 	}
-	if _, err := g.Commit("empty", false); err == nil {
+	if _, err := g.Commit("empty"); err == nil {
 		t.Error("empty commit should fail")
 	}
 	log := g.Log(10, g.Status())
