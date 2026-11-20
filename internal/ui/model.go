@@ -110,6 +110,7 @@ type Model struct {
 	flashSeq      int
 	findOrigin    int // cursor line when "/" was pressed, restored on esc
 	startFile     string
+	wantDiff      bool // open the next loaded file in diff view
 	themeFixed    bool // LENS_THEME set: don't follow the terminal background
 	pollEvery     time.Duration
 }
@@ -266,6 +267,18 @@ func (m *Model) openFile(rel string, line int) tea.Cmd {
 	return m.loadCmd(rel, line)
 }
 
+// openChanged opens a file from the changed-files list straight into its diff.
+func (m *Model) openChanged(rel string) tea.Cmd {
+	if rel == m.view.rel && m.view.loaded {
+		if !m.view.diff {
+			m.view.enterDiff()
+		}
+		return m.diffCmd(true)
+	}
+	m.wantDiff = true
+	return m.loadCmd(rel, 0)
+}
+
 // ---- update ----
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -295,10 +308,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loadedMsg:
 		m.view.setFile(msg.rel, msg.content, msg.target)
 		var cmds []tea.Cmd
+		if m.wantDiff {
+			m.wantDiff = false
+			m.view.enterDiff()
+			cmds = append(cmds, m.diffCmd(true))
+		}
 		if msg.content.Pending {
 			cmds = append(cmds, m.colourCmd(msg.rel, msg.content))
-		}
-		if m.view.diff {
+		} else if m.view.diff {
 			cmds = append(cmds, m.diffCmd(false))
 		}
 		return m, tea.Batch(cmds...)
@@ -459,6 +476,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case "d":
+		if m.focus == focusTree {
+			return m.toggleChangedView()
+		}
 		return m.toggleDiff()
 	case "/":
 		return m.openPrompt(modeFind, "/")
@@ -524,6 +544,9 @@ func (m *Model) keyTree(k string) tea.Cmd {
 		if n := t.selected(); n != nil {
 			if n.isDir {
 				t.toggle()
+			} else if t.changed {
+				m.focus = focusViewer
+				return m.openChanged(n.rel)
 			} else {
 				m.focus = focusViewer
 				return m.openFile(n.rel, 0)
@@ -604,6 +627,31 @@ func (m *Model) currentPath() string {
 		}
 	}
 	return m.view.rel
+}
+
+// toggleChangedView (sidebar `d`) flips the sidebar between all files and
+// changed files, and puts the viewer in or out of diff view to match. Focus
+// stays in the sidebar.
+func (m *Model) toggleChangedView() tea.Cmd {
+	if !m.git.OK {
+		return m.setFlash("not a git repository")
+	}
+	t, v := m.tree, m.view
+	t.toggleChanged()
+	if t.changed {
+		if len(t.rows) == 0 {
+			return m.setFlash("no changed files")
+		}
+		if v.loaded && v.rel != "" && !v.diff {
+			v.enterDiff()
+			return m.diffCmd(true)
+		}
+		return nil
+	}
+	if v.diff {
+		v.leaveDiff(0)
+	}
+	return nil
 }
 
 func (m *Model) toggleDiff() tea.Cmd {
@@ -980,7 +1028,7 @@ func helpBox() string {
 		{"space pgdn", "page down (pgup: up)"},
 		{"/  n N", "search in file, next / prev"},
 		{":", "go to line"},
-		{"d", "toggle git diff (enter jumps to line)"},
+		{"d", "toggle git diff (enter jumps to line); in sidebar: changed files only"},
 		{"y  Y", "copy path / path:line"},
 		{"r", "refresh"},
 		{"esc", "clear search · leave diff · back"},

@@ -155,6 +155,34 @@ func (v *viewer) setFile(rel string, c files.Content, target int) {
 
 var hunkRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)`)
 
+// highlightDiff syntax-colours the code part of each diff line (everything
+// after the +/-/space marker), so comments and strings stand out.
+func (v *viewer) highlightDiff() {
+	var idx []int
+	var code []string
+	for i, l := range v.diffPlain {
+		if v.diffNums[i] == 0 && !strings.HasPrefix(l, "-") || strings.HasPrefix(l, `\`) {
+			continue // hunk header / "no newline" marker
+		}
+		idx = append(idx, i)
+		code = append(code, files.ExpandTabs(l[1:]))
+	}
+	if len(code) == 0 {
+		return
+	}
+	hl := files.Highlight(v.rel, code)
+	for k, i := range idx {
+		l := v.diffPlain[i]
+		v.diffLines[i] = l[:1] + hl[k]
+		switch l[0] {
+		case '+':
+			v.diffLines[i] = sAdd.Render("+") + hl[k]
+		case '-':
+			v.diffLines[i] = sDel.Render("-") + hl[k]
+		}
+	}
+}
+
 // setDiff loads `git diff` output. Header lines before the first hunk are dropped.
 func (v *viewer) setDiff(out string, err error, first bool) {
 	v.diffLines, v.diffPlain, v.diffNums, v.diffNote = nil, nil, nil, ""
@@ -192,6 +220,7 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 		v.diffLines = append(v.diffLines, styled)
 		v.diffNums = append(v.diffNums, num)
 	}
+	v.highlightDiff()
 	if len(v.diffLines) == 0 && v.diffNote == "" {
 		v.diffNote = "No changes against HEAD"
 	}
@@ -415,6 +444,15 @@ func (v *viewer) render(focused bool) []string {
 			body = highlightRanges(v.plainLine(i), h, c)
 		} else if v.diff {
 			body = v.diffLines[i]
+			if st, ok := diffBg(v.diffPlain[i]); ok {
+				// full-width tinted row; cut the plain text so the tint spans the pane
+				bg := st
+				pl := ansi.Cut(v.diffLines[i], v.xoff, v.xoff+avail)
+				pl = fit(pl, avail)
+				pl = bg + strings.ReplaceAll(pl, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
+				out = append(out, fit(gutter+pl, v.width))
+				continue
+			}
 		} else {
 			body = v.styled[i]
 		}

@@ -31,6 +31,9 @@ type tree struct {
 	offset int
 	height int
 	marks  map[string]string // git status by path, including parent dirs
+
+	changed     bool    // show only changed files, as a flat list
+	changedRows []*node // flat nodes for the changed list
 }
 
 func newTree(root string) *tree {
@@ -81,6 +84,28 @@ func (t *tree) load(n *node) {
 
 func (t *tree) rebuild() {
 	t.rows = t.rows[:0]
+	if t.changed {
+		old := make(map[string]*node, len(t.changedRows))
+		for _, n := range t.changedRows {
+			old[n.rel] = n
+		}
+		t.changedRows = t.changedRows[:0]
+		for p, c := range t.marks {
+			if c == "•" || c == "D" {
+				continue
+			}
+			n := old[p]
+			if n == nil {
+				n = &node{name: p, rel: p}
+			}
+			t.changedRows = append(t.changedRows, n)
+		}
+		sort.Slice(t.changedRows, func(i, j int) bool { return t.changedRows[i].rel < t.changedRows[j].rel })
+		t.rows = append(t.rows, t.changedRows...)
+		t.cursor = clamp(t.cursor, 0, len(t.rows)-1)
+		t.ensureVisible()
+		return
+	}
 	var walk func(n *node)
 	walk = func(n *node) {
 		for _, k := range n.kids {
@@ -227,6 +252,31 @@ func (t *tree) setStatus(files map[string]string) {
 		}
 	}
 	t.marks = marks
+	if t.changed {
+		sel := ""
+		if n := t.selected(); n != nil {
+			sel = n.rel
+		}
+		t.rebuild()
+		if sel != "" {
+			t.selectPath(sel)
+		}
+	}
+}
+
+// toggleChanged switches between the full tree and a flat list of changed
+// files, keeping the cursor on the same file when it is in both.
+func (t *tree) toggleChanged() {
+	sel := ""
+	if n := t.selected(); n != nil {
+		sel = n.rel
+	}
+	t.changed = !t.changed
+	t.cursor, t.offset = 0, 0
+	t.rebuild()
+	if sel != "" {
+		t.selectPath(sel)
+	}
 }
 
 // render returns exactly t.height lines of width w.

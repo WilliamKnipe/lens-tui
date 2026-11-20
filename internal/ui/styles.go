@@ -30,7 +30,9 @@ var (
 	sFuzzyHit = lipgloss.NewStyle().Foreground(colYellow).Bold(true)
 	sAdd      = lipgloss.NewStyle().Foreground(colGreen)
 	sDel      = lipgloss.NewStyle().Foreground(colRed)
-	sHunk     = lipgloss.NewStyle().Foreground(colCyan)
+	sHunk     = lipgloss.NewStyle().Foreground(colDim).Italic(true)
+	sAddBg    = "\x1b[48;2;31;51;38m"
+	sDelBg    = "\x1b[48;2;58;33;41m"
 	sChip     = lipgloss.NewStyle().Background(colAccent).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
 	sBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(0, 1)
 )
@@ -108,4 +110,15 @@ func asciiLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// diffBg returns the row tint for an added or removed diff line.
+func diffBg(l string) (string, bool) {
+	switch {
+	case strings.HasPrefix(l, "+"):
+		return sAddBg, true
+	case strings.HasPrefix(l, "-"):
+		return sDelBg, true
+	}
+	return "", false
 }

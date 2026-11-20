@@ -13,6 +13,8 @@ go install github.com/williamknipe/lens@latest   # or: go build -o ~/bin/lens .
 lens            # current directory
 lens ~/code/app # another directory
 lens main.go    # open a file straight away
+lens --log      # print the debug log path
+lens --help     # usage
 ```
 
 No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is installed, Ctrl+F uses it; otherwise a built-in search is used.
@@ -32,12 +34,13 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | `space` `pgdn` / `pgup` | Page down / up |
 | `enter` | Open file / toggle folder |
 | `l` `space` | Preview file but stay in the sidebar |
-| `h` | Collapse folder / go to parent |
+| `h` | Collapse folder / go to parent (in the viewer: scroll left) |
+| `l` `→` | In the viewer: scroll right. `0` resets to the left edge |
 | `g` `G` | Top / bottom |
 | `ctrl+d` `ctrl+u` | Half page down / up |
 | `/` then `n` `N` | Search in file, next / previous match |
 | `:` | Go to line |
-| `d` | Toggle git diff vs HEAD (enter jumps to that line) |
+| `d` | Toggle git diff vs HEAD (enter jumps to that line). In the sidebar: list changed files only; enter opens a file's diff |
 | `y` / `Y` | Copy path / `path:line` (paste into Claude) |
 | `r` | Refresh |
 | `esc` | Clear search · leave diff · back to sidebar |
@@ -61,7 +64,8 @@ keybind = cmd+p=text:\x10
 This makes Cmd+P send Ctrl+P in **every** pane: in zsh that recalls the previous command, in Claude Code it
 moves up through prompt history, in vim it's completion. That's why it's not the default.
 
-Cmd+F stays Ghostty's own scrollback search; use Ctrl+F for search in lens.
+Cmd+F stays Ghostty's own scrollback search; use Ctrl+F for search in lens (Cmd+Shift+F also works when the
+terminal sends it as `super+shift+f`).
 
 ## Live updates
 
