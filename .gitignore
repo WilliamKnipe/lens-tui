@@ -1,0 +1,40 @@
+# Binaries
+/lens-tui
+/lens
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test binaries and artifacts
+*.test
+*.out
+*.prof
+coverage.*
+
+# Build output
+/bin/
+/dist/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Debug logs
+*.log
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env / local config
+.env
+.env.*
+.claude/settings.local.json
