@@ -480,3 +480,53 @@ func TestCycleFileChangedSidebar(t *testing.T) {
 		t.Fatalf("visited %v, want the 4 changed files", seen)
 	}
 }
+
+// TestDiffRefreshOnlyOnGitChange: in diff view, a poll with no git change
+// doesn't rerun git diff; a commit does.
+func TestDiffRefreshOnlyOnGitChange(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x\n"), 0o644)
+	git("add", ".")
+	git("commit", "-qm", "init")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("y\n"), 0o644)
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.pollCmd()())
+	for _, msg := range runBatch(m.openChanged("a.txt")) {
+		for _, dm := range runBatch(func() tea.Msg { _, c := m.Update(msg); return c() }) {
+			m.Update(dm)
+		}
+	}
+	if !m.view.diff || len(m.view.diffLines) == 0 {
+		t.Fatal("diff not open")
+	}
+	diffs := func() int {
+		n := 0
+		for _, msg := range runBatch(m.handlePoll(m.pollCmd()().(pollResultMsg))) {
+			if _, ok := msg.(diffMsg); ok {
+				n++
+			}
+			m.Update(msg)
+		}
+		return n
+	}
+	if n := diffs(); n != 0 {
+		t.Fatalf("idle poll ran git diff %d times", n)
+	}
+	git("commit", "-qam", "edit")
+	if n := diffs(); n != 1 {
+		t.Fatalf("poll after commit ran git diff %d times, want 1", n)
+	}
+	if m.view.diffNote != "No changes against HEAD" {
+		t.Fatalf("diff not refreshed: note=%q", m.view.diffNote)
+	}
+}

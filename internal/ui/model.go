@@ -237,7 +237,8 @@ func (m *Model) diffCmd(first bool) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 		out, err := g.Diff(rel, untracked)
-		debug.Since("git diff", start, 300*time.Millisecond, false, rel)
+		// refreshes are logged only when slow; opening a diff always is
+		debug.Since("git diff", start, 300*time.Millisecond, !first, rel)
 		return diffMsg{rel, out, err, first}
 	}
 }
@@ -621,7 +622,7 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 	cmds := []tea.Cmd{tea.Tick(m.pollEvery, func(time.Time) tea.Msg { return pollMsg{} })}
 	start := time.Now()
 	defer func() { debug.Since("tree refresh", start, 50*time.Millisecond, true, "") }()
-	oldCode := m.status.Files[m.view.rel]
+	oldCode, oldBranch := m.status.Files[m.view.rel], m.status.Branch
 	m.status = r.status
 	m.tree.setStatus(r.status.Files)
 	m.tree.refresh()
@@ -658,11 +659,13 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		case !r.missing && (!r.mod.Equal(m.view.mod) || r.size != m.view.size):
 			m.followJump = m.follow
 			cmds = append(cmds, m.loadCmd(r.rel, 0))
+		case oldCode == r.status.Files[r.rel] && oldBranch == r.status.Branch:
+			// git state unchanged: no need to diff again
 		case m.view.diff:
-			// git state may have changed (e.g. a commit) without touching the file
+			// e.g. committed, reverted or switched branch without touching the file
 			cmds = append(cmds, m.diffCmd(false))
-		case oldCode != r.status.Files[r.rel]:
-			cmds = append(cmds, m.changesCmd()) // e.g. committed or reverted
+		default:
+			cmds = append(cmds, m.changesCmd())
 		}
 	}
 	return tea.Batch(cmds...)
@@ -797,9 +800,9 @@ func (m *Model) keyTree(k string) tea.Cmd {
 		t.move(1)
 	case "k", "up":
 		t.move(-1)
-	case "ctrl+d", "pgdown":
+	case "ctrl+d", "super+down", "pgdown":
 		t.move(max(1, t.height/2))
-	case "ctrl+u", "pgup":
+	case "ctrl+u", "super+up", "pgup":
 		t.move(-max(1, t.height/2))
 	case "g", "home":
 		t.move(-len(t.rows))
@@ -848,9 +851,9 @@ func (m *Model) keyViewer(k string) tea.Cmd {
 		v.scroll(1)
 	case "k", "up":
 		v.scroll(-1)
-	case "ctrl+d":
+	case "ctrl+d", "super+down":
 		v.scroll(max(1, v.height/2))
-	case "ctrl+u":
+	case "ctrl+u", "super+up":
 		v.scroll(-max(1, v.height/2))
 	case "pgdown", "space":
 		v.scroll(max(1, v.height-2))
@@ -1424,7 +1427,7 @@ func helpBox() string {
 		{"l space", "preview file, stay in sidebar"},
 		{"h", "collapse folder / go to parent"},
 		{"g G", "top / bottom"},
-		{"ctrl+d ctrl+u", "half page down / up"},
+		{"cmd+↓ cmd+↑", "half page down / up (also ctrl+d ctrl+u)"},
 		{"space pgdn", "page down (pgup: up)"},
 		{"/  n N", "search in file, next / prev"},
 		{":", "go to line"},

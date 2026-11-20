@@ -41,7 +41,7 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | `h` | Collapse folder / go to parent (in the viewer: scroll left) |
 | `l` `→` | In the viewer: scroll right. `0` resets to the left edge |
 | `g` `G` | Top / bottom |
-| `ctrl+d` `ctrl+u` | Half page down / up |
+| `cmd+↓` `cmd+↑` | Half page down / up (`ctrl+d` `ctrl+u` also work) |
 | `/` then `n` `N` | Search in file, next / previous match |
 | `:` | Go to line |
 | `d` | Toggle git diff vs HEAD (enter jumps to that line). In the sidebar: list changed files only; enter opens a file's diff |
