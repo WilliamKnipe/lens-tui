@@ -1,4 +1,4 @@
-module github.com/williamknipe/lens
+module github.com/williamknipe/lens-tui
 
 go 1.26.0
 

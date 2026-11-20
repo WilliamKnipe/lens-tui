@@ -10,7 +10,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"github.com/sahilm/fuzzy"
 
-	"github.com/williamknipe/lens/internal/debug"
+	"github.com/williamknipe/lens-tui/internal/debug"
 )
 
 const (

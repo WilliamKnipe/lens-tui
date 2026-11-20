@@ -12,7 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/williamknipe/lens/internal/files"
+	"github.com/williamknipe/lens-tui/internal/files"
 )
 
 func TestSplitLine(t *testing.T) {

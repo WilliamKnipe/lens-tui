@@ -12,8 +12,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/williamknipe/lens/internal/debug"
-	"github.com/williamknipe/lens/internal/ui"
+	"github.com/williamknipe/lens-tui/internal/debug"
+	"github.com/williamknipe/lens-tui/internal/ui"
 )
 
 func main() {

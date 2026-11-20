@@ -9,7 +9,7 @@ mode that jumps to whatever Claude just edited.
 ## Install
 
 ```sh
-go install github.com/williamknipe/lens@latest   # or: go build -o ~/bin/lens .
+go install github.com/williamknipe/lens-tui/cmd/lens@latest   # or, from a checkout: go install ./cmd/lens
 ```
 
 ```sh

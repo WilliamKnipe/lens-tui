@@ -9,8 +9,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/williamknipe/lens/internal/debug"
-	"github.com/williamknipe/lens/internal/files"
+	"github.com/williamknipe/lens-tui/internal/debug"
+	"github.com/williamknipe/lens-tui/internal/files"
 )
 
 const searchLimit = 500

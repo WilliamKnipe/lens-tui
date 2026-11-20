@@ -10,7 +10,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/williamknipe/lens/internal/files"
+	"github.com/williamknipe/lens-tui/internal/files"
 )
 
 type match struct{ line, start, end int }
