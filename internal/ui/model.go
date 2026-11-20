@@ -92,6 +92,7 @@ type (
 		gitTook time.Duration
 		texts   map[string][]string // new contents of changed files edited since their last snapshot
 	}
+	committedMsg  struct{ files []files.Committed }
 	flashClearMsg struct{ seq int }
 	copiedMsg     struct {
 		text string
@@ -139,6 +140,8 @@ type Model struct {
 	// edit touched rather than the first change against HEAD
 	snaps   map[string][]string
 	snapMod map[string]time.Time
+
+	committed []files.Committed // files from the latest commits, newest first
 }
 
 const (
@@ -175,7 +178,7 @@ func New(root, openFile string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.indexCmd(), m.pollCmd(), tea.RequestBackgroundColor}
+	cmds := []tea.Cmd{m.indexCmd(), m.pollCmd(), m.committedCmd(), tea.RequestBackgroundColor}
 	if m.startFile != "" {
 		m.tree.reveal(m.startFile)
 		m.focus = focusViewer
@@ -193,6 +196,18 @@ func (m *Model) indexCmd() tea.Cmd {
 		list := files.ListFiles(root)
 		debug.Since("index", start, 500*time.Millisecond, false, fmt.Sprintf("%d files", len(list)))
 		return indexMsg{list}
+	}
+}
+
+// committedCmd lists files from recent commits for the finder's
+// "Recently changed" list.
+func (m *Model) committedCmd() tea.Cmd {
+	g := m.git
+	return func() tea.Msg {
+		start := time.Now()
+		list := g.RecentCommitted(recentPerList * 2)
+		debug.Since("git log", start, 200*time.Millisecond, true, fmt.Sprintf("%d files", len(list)))
+		return committedMsg{list}
 	}
 }
 
@@ -467,6 +482,12 @@ func (m *Model) recentLists() (changed, viewed []recentItem) {
 	for p, t := range m.changedMod {
 		changed = append(changed, recentItem{rel: p, changed: true, mark: m.status.Files[p], mod: t})
 	}
+	// files from recent commits, so the list isn't empty once work is committed
+	for _, c := range m.committed {
+		if _, ok := m.changedMod[c.Path]; !ok {
+			changed = append(changed, recentItem{rel: c.Path, changed: true, mod: c.Time})
+		}
+	}
 	sort.Slice(changed, func(i, j int) bool {
 		if !changed[i].mod.Equal(changed[j].mod) {
 			return changed[i].mod.After(changed[j].mod)
@@ -557,6 +578,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.changesCmd())
 		}
 		return m, tea.Batch(cmds...)
+
+	case committedMsg:
+		m.committed = msg.files
+		if m.mode == modeFinder && m.finder.showRecent() {
+			sel := m.finder.sel
+			m.finder.setRecent(m.recentLists())
+			m.finder.sel = clamp(sel, 0, len(m.finder.recent)-1)
+		}
+		return m, nil
 
 	case changesMsg:
 		if msg.rel == m.view.rel {
@@ -1090,7 +1120,7 @@ func (m *Model) openFinder() tea.Cmd {
 	m.finder.refilter()
 	m.finder.setRecent(m.recentLists())
 	// refresh the index in the background so new files show up
-	return tea.Batch(m.finder.input.Focus(), m.indexCmd())
+	return tea.Batch(m.finder.input.Focus(), m.indexCmd(), m.committedCmd())
 }
 
 func (m *Model) keyFinder(msg tea.KeyPressMsg) tea.Cmd {

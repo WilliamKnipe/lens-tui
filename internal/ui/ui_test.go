@@ -670,3 +670,34 @@ func TestDeletedFileInChangedList(t *testing.T) {
 		t.Fatalf("deleted file's diff not shown:\n%s", out)
 	}
 }
+
+// TestRecentIncludesCommitted: with a clean tree, ctrl+p still lists the
+// files from recent commits as recently changed.
+func TestRecentIncludesCommitted(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	os.WriteFile(filepath.Join(dir, "old.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o644)
+	git("add", "old.txt")
+	git("commit", "-qm", "one")
+	git("add", "new.txt")
+	git("commit", "-qm", "two")
+	os.WriteFile(filepath.Join(dir, "old.txt"), []byte("y"), 0o644) // uncommitted edit
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.pollCmd()())
+	m.Update(m.committedCmd()())
+	m.handleKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	r := m.finder.recent
+	if len(r) != 2 || r[0].rel != "old.txt" || r[0].mark != "M" || r[1].rel != "new.txt" || r[1].mark != "" {
+		t.Fatalf("recent = %+v", r)
+	}
+}

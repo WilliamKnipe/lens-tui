@@ -182,7 +182,11 @@ func (f *finder) recentRows(w int) []string {
 		}
 		var right string
 		if it.changed {
-			right = gitStyle(it.mark).Render(it.mark) + " " + sDim.Render(fmt.Sprintf("%4s", ago(now.Sub(it.mod))))
+			// committed files have no status letter, just the age
+			right = sDim.Render(fmt.Sprintf("%4s", ago(now.Sub(it.mod))))
+			if it.mark != "" {
+				right = gitStyle(it.mark).Render(it.mark) + " " + right
+			}
 		} else if it.mark != "" {
 			right = gitStyle(it.mark).Render(it.mark)
 		}

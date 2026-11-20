@@ -2,7 +2,11 @@ package files
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Git wraps git commands for one root directory. OK is false when the root
@@ -122,4 +126,55 @@ func (g Git) Diff(rel string, untracked bool) (string, error) {
 		out, err = gitCmd(g.Root, "diff", "--no-color", "--", rel)
 	}
 	return string(out), err
+}
+
+// Committed is a file changed by a recent commit.
+type Committed struct {
+	Path string
+	Time time.Time // commit time
+}
+
+// RecentCommitted lists up to n files changed by the latest commits, newest
+// first, each path once. Paths are root-relative; files that no longer exist
+// are left out.
+func (g Git) RecentCommitted(n int) []Committed {
+	if !g.OK || n <= 0 {
+		return nil
+	}
+	// %x00 marks the commit lines, so a file named "1700000000" can't be
+	// mistaken for a timestamp. --relative limits to root and trims the prefix.
+	out, err := gitCmd(g.Root, "-c", "core.quotePath=false", "log", "-n", "100", "--format=%x00%ct",
+		"--name-only", "--relative", "--diff-filter=d", "--no-merges")
+	if err != nil {
+		return nil
+	}
+	return parseCommitted(string(out), n, func(p string) bool {
+		fi, err := os.Stat(filepath.Join(g.Root, filepath.FromSlash(p)))
+		return err == nil && !fi.IsDir()
+	})
+}
+
+func parseCommitted(out string, n int, exists func(string) bool) []Committed {
+	var res []Committed
+	seen := map[string]bool{}
+	var t time.Time
+	for _, l := range strings.Split(out, "\n") {
+		if ts, ok := strings.CutPrefix(l, "\x00"); ok {
+			if sec, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
+				t = time.Unix(sec, 0)
+			}
+			continue
+		}
+		if l == "" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		if exists(l) {
+			res = append(res, Committed{l, t})
+			if len(res) >= n {
+				break
+			}
+		}
+	}
+	return res
 }

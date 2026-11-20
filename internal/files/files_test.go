@@ -135,3 +135,47 @@ func TestBuiltinGrep(t *testing.T) {
 		t.Errorf("case-sensitive got %v", res)
 	}
 }
+
+func TestParseCommitted(t *testing.T) {
+	out := "\x001700000200\n\na.go\n1700000000\n\x001700000100\n\nb.go\na.go\ngone.go\n"
+	got := parseCommitted(out, 10, func(p string) bool { return p != "gone.go" })
+	if len(got) != 3 || got[0].Path != "a.go" || got[1].Path != "1700000000" || got[2].Path != "b.go" {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0].Time.Unix() != 1700000200 || got[2].Time.Unix() != 1700000100 {
+		t.Errorf("times %v %v", got[0].Time, got[2].Time)
+	}
+	if n := len(parseCommitted(out, 1, func(string) bool { return true })); n != 1 {
+		t.Errorf("limit: got %d", n)
+	}
+}
+
+func TestRecentCommitted(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	for _, p := range []string{"top.txt", "sub/a.txt", "sub/b.txt"} {
+		os.WriteFile(filepath.Join(dir, p), []byte("x"), 0o644)
+	}
+	git("add", ".")
+	git("commit", "-qm", "one")
+	os.WriteFile(filepath.Join(dir, "sub/b.txt"), []byte("y"), 0o644)
+	git("commit", "-qam", "two")
+
+	got := OpenGit(dir).RecentCommitted(10)
+	if len(got) != 3 || got[0].Path != "sub/b.txt" {
+		t.Fatalf("top: %+v", got)
+	}
+	// opened on a subfolder: paths are relative to it, other folders left out
+	got = OpenGit(filepath.Join(dir, "sub")).RecentCommitted(10)
+	if len(got) != 2 || got[0].Path != "b.txt" || got[1].Path != "a.txt" {
+		t.Fatalf("sub: %+v", got)
+	}
+}
