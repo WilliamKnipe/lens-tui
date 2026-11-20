@@ -83,9 +83,13 @@ files that won't be committed, and a diff of the selected file.
 - `esc` closes and keeps the message as a draft. If a commit hook fails, its output shows and the message stays.
 - lens only ever adds commits. It never amends or rewrites history.
 
+<img width="1115" height="585" alt="Screenshot 2026-11-20 at 20 21 10" src="https://github.com/user-attachments/assets/406d7423-3fa3-4312-ab0d-ce56a48ea110" />
+
 **Push.** The status bar shows `↑3 P push` when commits aren't pushed. `P` shows the commit graph with
 unpushed commits highlighted and the files each one changed; `enter` pushes (with `-u` if the branch has no
 upstream). Git can't prompt for a password inside lens, so if it needs credentials, push once from a shell.
+
+<img width="1114" height="478" alt="Screenshot 2026-11-20 at 20 21 23" src="https://github.com/user-attachments/assets/bbb62fa1-f21c-4f3c-b60a-b70cb8c4ea66" />
 
 ## Live updates and follow mode
 
