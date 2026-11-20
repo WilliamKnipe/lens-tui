@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -455,13 +456,18 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		m.layout()
 		return nil
-	case "tab", "shift+tab":
-		if m.focus == focusTree {
-			m.focus = focusViewer
-		} else if m.showTree {
+	case "super+left", "alt+left":
+		if m.showTree {
 			m.focus = focusTree
 		}
 		return nil
+	case "super+right", "alt+right":
+		m.focus = focusViewer
+		return nil
+	case "tab":
+		return m.cycleSibling(1)
+	case "shift+tab":
+		return m.cycleSibling(-1)
 	case "y":
 		if p := m.currentPath(); p != "" {
 			return copyCmd(p)
@@ -545,10 +551,8 @@ func (m *Model) keyTree(k string) tea.Cmd {
 			if n.isDir {
 				t.toggle()
 			} else if t.changed {
-				m.focus = focusViewer
 				return m.openChanged(n.rel)
 			} else {
-				m.focus = focusViewer
 				return m.openFile(n.rel, 0)
 			}
 		}
@@ -618,6 +622,42 @@ func (m *Model) keyViewer(k string) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// cycleSibling opens the next (d=1) or previous (d=-1) file in the same
+// directory as the open file, wrapping around. Focus is left alone.
+func (m *Model) cycleSibling(d int) tea.Cmd {
+	t := m.tree
+	cur := m.view.rel
+	if cur == "" {
+		if n := t.selected(); n != nil && !n.isDir {
+			cur = n.rel
+		}
+	}
+	if cur == "" {
+		return nil
+	}
+	dir := path.Dir(cur)
+	var sibs []*node
+	idx := -1
+	for _, r := range t.rows {
+		if r.isDir || path.Dir(r.rel) != dir {
+			continue
+		}
+		if r.rel == cur {
+			idx = len(sibs)
+		}
+		sibs = append(sibs, r)
+	}
+	if len(sibs) < 2 || idx < 0 {
+		return nil
+	}
+	n := sibs[(idx+d+len(sibs))%len(sibs)]
+	t.selectPath(n.rel)
+	if t.changed {
+		return m.openChanged(n.rel)
+	}
+	return m.openFile(n.rel, 0)
 }
 
 func (m *Model) currentPath() string {
@@ -1014,7 +1054,8 @@ func helpBox() string {
 	keys := [][2]string{
 		{"ctrl+p", "find file (add :42 for a line)"},
 		{"ctrl+f", "search in all files (ripgrep)"},
-		{"tab", "switch sidebar / viewer"},
+		{"tab / shift+tab", "next / previous file in same dir"},
+		{"cmd+← / cmd+→", "focus sidebar / viewer"},
 		{"ctrl+b", "hide / show sidebar"},
 		{"j k ↑ ↓", "scroll (sidebar: move)"},
 		{"J K ⇧↑ ⇧↓", "move cursor only"},

@@ -27,7 +27,8 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | --- | --- |
 | `ctrl+p` | Find file (fuzzy, top 5). Add `:42` to jump to a line |
 | `ctrl+f` | Search text in all files, enter jumps to the line |
-| `tab` | Switch between sidebar and viewer |
+| `tab` / `shift+tab` | Next / previous file in the same directory |
+| `cmd+←` / `cmd+→` | Focus sidebar / viewer |
 | `ctrl+b` | Hide / show sidebar |
 | `j` `k` `↑` `↓` | Scroll the file (move in the sidebar) |
 | `J` `K` `⇧↑` `⇧↓` | Move the cursor without scrolling |
