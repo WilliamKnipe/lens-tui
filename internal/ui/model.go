@@ -456,12 +456,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		m.layout()
 		return nil
-	case "super+left", "alt+left":
+	case "super+left", "alt+left", "ctrl+a":
 		if m.showTree {
 			m.focus = focusTree
 		}
 		return nil
-	case "super+right", "alt+right":
+	case "super+right", "alt+right", "ctrl+e":
 		m.focus = focusViewer
 		return nil
 	case "tab":
