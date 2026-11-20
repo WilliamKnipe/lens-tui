@@ -74,6 +74,18 @@ moves up through prompt history, in vim it's completion. That's why it's not the
 Cmd+F stays Ghostty's own scrollback search; use Ctrl+F for search in lens (Cmd+Shift+F also works when the
 terminal sends it as `super+shift+f`).
 
+## Cmd+↑ / Cmd+↓ in Ghostty
+
+Ghostty uses Cmd+↑/↓ itself (jump to previous/next prompt), so lens never sees them. To use them for
+half-page scrolling, add this to Ghostty's config and reload it (Cmd+Shift+,):
+
+```
+keybind = cmd+up=unbind
+keybind = cmd+down=unbind
+```
+
+Option+Cmd+arrows (switch split) are separate bindings and keep working. Without this, use `ctrl+d` / `ctrl+u`.
+
 ## Live updates
 
 lens checks the open file and `git status` once a second. When Claude edits a file, the viewer reloads

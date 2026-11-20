@@ -530,3 +530,22 @@ func TestDiffRefreshOnlyOnGitChange(t *testing.T) {
 		t.Fatalf("diff not refreshed: note=%q", m.view.diffNote)
 	}
 }
+
+// TestCmdArrowsHalfPage: Ghostty sends Cmd+Down as meta+down (kitty protocol).
+func TestCmdArrowsHalfPage(t *testing.T) {
+	v := &viewer{lines: make([]string, 300), height: 40, loaded: true}
+	m := New(t.TempDir(), "")
+	m.view, m.focus = v, focusViewer
+	for _, mod := range []tea.KeyMod{tea.ModMeta, tea.ModSuper} {
+		v.cur, v.off = 0, 0
+		k := tea.KeyPressMsg{Code: tea.KeyDown, Mod: mod}
+		m.handleKey(k)
+		if v.off != 20 {
+			t.Fatalf("%s: off=%d, want 20", k.String(), v.off)
+		}
+		m.handleKey(tea.KeyPressMsg{Code: tea.KeyUp, Mod: mod})
+		if v.off != 0 {
+			t.Fatalf("%s up: off=%d", k.String(), v.off)
+		}
+	}
+}

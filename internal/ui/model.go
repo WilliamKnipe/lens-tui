@@ -800,9 +800,9 @@ func (m *Model) keyTree(k string) tea.Cmd {
 		t.move(1)
 	case "k", "up":
 		t.move(-1)
-	case "ctrl+d", "super+down", "pgdown":
+	case "ctrl+d", "super+down", "meta+down", "pgdown":
 		t.move(max(1, t.height/2))
-	case "ctrl+u", "super+up", "pgup":
+	case "ctrl+u", "super+up", "meta+up", "pgup":
 		t.move(-max(1, t.height/2))
 	case "g", "home":
 		t.move(-len(t.rows))
@@ -851,9 +851,9 @@ func (m *Model) keyViewer(k string) tea.Cmd {
 		v.scroll(1)
 	case "k", "up":
 		v.scroll(-1)
-	case "ctrl+d", "super+down":
+	case "ctrl+d", "super+down", "meta+down":
 		v.scroll(max(1, v.height/2))
-	case "ctrl+u", "super+up":
+	case "ctrl+u", "super+up", "meta+up":
 		v.scroll(-max(1, v.height/2))
 	case "pgdown", "space":
 		v.scroll(max(1, v.height-2))
