@@ -13,7 +13,18 @@ import (
 	"github.com/williamknipe/lens/internal/debug"
 )
 
-const finderResults = 5
+const (
+	finderResults = 5
+	recentPerList = 5
+)
+
+// recentItem is a row in the finder's empty-query list.
+type recentItem struct {
+	rel     string
+	changed bool   // "recently changed" (else "recently viewed")
+	mark    string // git status letter
+	mod     time.Time
+}
 
 // finder is the Ctrl+P quick-open popup.
 type finder struct {
@@ -21,6 +32,7 @@ type finder struct {
 	files   []string
 	indexed bool
 	results []fuzzy.Match
+	recent  []recentItem // shown while the query is empty, picked with 1-9, 0
 	sel     int
 	line    int // from a "file:42" suffix
 }
@@ -68,15 +80,51 @@ func (f *finder) refilter() {
 	f.results = res
 }
 
+// showRecent is true while the query is empty, so the recent lists show.
+func (f *finder) showRecent() bool {
+	q, _ := splitLine(f.input.Value())
+	return strings.TrimSpace(q) == ""
+}
+
 func (f *finder) move(d int) {
-	f.sel = clamp(f.sel+d, 0, len(f.results)-1)
+	n := len(f.results)
+	if f.showRecent() {
+		n = len(f.recent)
+	}
+	f.sel = clamp(f.sel+d, 0, n-1)
 }
 
 func (f *finder) picked() (string, bool) {
+	if f.showRecent() {
+		if f.sel < 0 || f.sel >= len(f.recent) {
+			return "", false
+		}
+		return f.recent[f.sel].rel, true
+	}
 	if f.sel < 0 || f.sel >= len(f.results) {
 		return "", false
 	}
 	return f.results[f.sel].Str, true
+}
+
+// digitIndex maps "1".."9" to 0..8 and "0" to 9; -1 for other keys.
+func digitIndex(k string) int {
+	if len(k) != 1 || k[0] < '0' || k[0] > '9' {
+		return -1
+	}
+	if k[0] == '0' {
+		return 9
+	}
+	return int(k[0] - '1')
+}
+
+// setRecent builds the empty-query lists: up to five changed files (newest
+// first) and up to five recently viewed files.
+func (f *finder) setRecent(changed, viewed []recentItem) {
+	f.recent = f.recent[:0]
+	f.recent = append(f.recent, changed[:min(len(changed), recentPerList)]...)
+	f.recent = append(f.recent, viewed[:min(len(viewed), recentPerList)]...)
+	f.sel = 0
 }
 
 func (f *finder) view(w int) string {
@@ -84,6 +132,8 @@ func (f *finder) view(w int) string {
 	lines := []string{f.input.View(), sFaint.Render(strings.Repeat("─", w))}
 	q, _ := splitLine(f.input.Value())
 	switch {
+	case strings.TrimSpace(q) == "" && len(f.recent) > 0:
+		lines = append(lines, f.recentRows(w)...)
 	case !f.indexed:
 		lines = append(lines, sDim.Render("  indexing…"))
 	case strings.TrimSpace(q) == "":
@@ -98,6 +148,63 @@ func (f *finder) view(w int) string {
 		lines = append(lines, "")
 	}
 	return box(lines, w)
+}
+
+// recentRows renders the numbered "recently changed" / "recently viewed"
+// sections.
+func (f *finder) recentRows(w int) []string {
+	var lines []string
+	now := time.Now()
+	for i, it := range f.recent {
+		if i == 0 || it.changed != f.recent[i-1].changed {
+			if i > 0 {
+				lines = append(lines, "")
+			}
+			title := "Recently viewed"
+			if it.changed {
+				title = "Recently changed"
+			}
+			lines = append(lines, sDim.Render("  "+title))
+		}
+		sel := i == f.sel
+		prefix := "  "
+		if sel {
+			prefix = sAccent.Render("› ")
+		}
+		num := sAccent.Render(strconv.Itoa((i + 1) % 10))
+		dir, name := path.Split(it.rel)
+		if sel {
+			name = sBold.Render(name)
+		}
+		left := prefix + num + "  " + name
+		if dir != "" {
+			left += "  " + sDim.Render(dir)
+		}
+		var right string
+		if it.changed {
+			right = gitStyle(it.mark).Render(it.mark) + " " + sDim.Render(fmt.Sprintf("%4s", ago(now.Sub(it.mod))))
+		} else if it.mark != "" {
+			right = gitStyle(it.mark).Render(it.mark)
+		}
+		rw := ansiWidth(right)
+		lines = append(lines, fit(left, w-rw-1)+" "+right)
+	}
+	return lines
+}
+
+// ago formats a duration as a short age: "now", "12s", "3m", "2h", "4d".
+func ago(d time.Duration) string {
+	switch {
+	case d < 2*time.Second:
+		return "now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 // row shows "name  dir/" with the fuzzy-matched characters highlighted.

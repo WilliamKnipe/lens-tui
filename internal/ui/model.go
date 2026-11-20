@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +79,7 @@ type (
 	pollMsg       struct{}
 	pollResultMsg struct {
 		status  files.Status
+		mods    map[string]time.Time // mtime of each changed file (not deleted ones)
 		rel     string
 		mod     time.Time
 		size    int64
@@ -114,7 +116,15 @@ type Model struct {
 	wantDiff      bool // open the next loaded file in diff view
 	themeFixed    bool // LENS_THEME set: don't follow the terminal background
 	pollEvery     time.Duration
+
+	changedMod map[string]time.Time // last poll's mtimes of changed files (nil before the first poll)
+	viewed     []string             // recently opened files, newest first
+	follow     bool                 // follow mode: open whatever file was just edited
+	followJump bool                 // next reload of the open file: jump to the edited line
+	followLine int                  // 1-based line to show once the diff view reloads
 }
+
+const maxViewed = 20
 
 // New creates the model for root. openFile (relative to root) is opened on
 // start when not empty.
@@ -223,6 +233,15 @@ func (m *Model) pollCmd() tea.Cmd {
 		start := time.Now()
 		r := pollResultMsg{status: g.Status(), rel: rel}
 		r.gitTook = debug.Since("git status", start, 100*time.Millisecond, true, fmt.Sprintf("%d changed", len(r.status.Files)))
+		r.mods = make(map[string]time.Time, len(r.status.Files))
+		for p, c := range r.status.Files {
+			if c == "D" {
+				continue
+			}
+			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err == nil && !fi.IsDir() {
+				r.mods[p] = fi.ModTime()
+			}
+		}
 		if rel != "" {
 			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err == nil {
 				r.mod, r.size = fi.ModTime(), fi.Size()
@@ -280,6 +299,91 @@ func (m *Model) openChanged(rel string) tea.Cmd {
 	return m.loadCmd(rel, 0)
 }
 
+// followOpenCmd loads rel for follow mode and puts the cursor on its first
+// change against HEAD.
+func (m *Model) followOpenCmd(rel string) tea.Cmd {
+	g, root, untracked := m.git, m.root, m.status.Files[rel] == "?"
+	return func() tea.Msg {
+		c := files.Load(root, rel, deferHighlightLines)
+		out, _ := g.Diff(rel, untracked)
+		return loadedMsg{rel, c, firstChangedLine(out)}
+	}
+}
+
+// firstChangedLine is the 1-based line in the new file of the first change
+// in a unified diff (0 if none).
+func firstChangedLine(diff string) int {
+	n := 0
+	inHunk := false
+	for _, l := range files.SplitLines(diff) {
+		if mm := hunkRe.FindStringSubmatch(l); mm != nil {
+			n, _ = strconv.Atoi(mm[1])
+			inHunk = true
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "+"), strings.HasPrefix(l, "-"):
+			return max(1, n)
+		case strings.HasPrefix(l, `\`):
+		default:
+			n++
+		}
+	}
+	return 0
+}
+
+// firstDiffLine is the 1-based first line where old and new differ (0 if
+// they are the same).
+func firstDiffLine(old, new []string) int {
+	for i := range min(len(old), len(new)) {
+		if old[i] != new[i] {
+			return i + 1
+		}
+	}
+	if len(old) != len(new) {
+		return min(len(old), len(new)) + 1
+	}
+	return 0
+}
+
+// pushViewed records rel as the most recently viewed file.
+func (m *Model) pushViewed(rel string) {
+	out := []string{rel}
+	for _, p := range m.viewed {
+		if p != rel && len(out) < maxViewed {
+			out = append(out, p)
+		}
+	}
+	m.viewed = out
+}
+
+// recentLists builds the finder's "recently changed" and "recently viewed"
+// lists. The open file is left out of the viewed list.
+func (m *Model) recentLists() (changed, viewed []recentItem) {
+	for p, t := range m.changedMod {
+		changed = append(changed, recentItem{rel: p, changed: true, mark: m.status.Files[p], mod: t})
+	}
+	sort.Slice(changed, func(i, j int) bool {
+		if !changed[i].mod.Equal(changed[j].mod) {
+			return changed[i].mod.After(changed[j].mod)
+		}
+		return changed[i].rel < changed[j].rel
+	})
+	for _, p := range m.viewed {
+		if p == m.view.rel {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(p))); err != nil {
+			continue
+		}
+		viewed = append(viewed, recentItem{rel: p, mark: m.status.Files[p]})
+	}
+	return changed, viewed
+}
+
 // ---- update ----
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -307,6 +411,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loadedMsg:
+		if msg.rel != m.view.rel {
+			m.pushViewed(msg.rel)
+		}
+		if m.followJump && msg.rel == m.view.rel && m.view.loaded {
+			m.followJump = false
+			if line := firstDiffLine(m.view.lines, msg.content.Lines); line > 0 {
+				if m.view.diff {
+					m.followLine = line // applied when the diff reloads
+				} else {
+					msg.target = line
+				}
+			}
+		}
 		m.view.setFile(msg.rel, msg.content, msg.target)
 		var cmds []tea.Cmd
 		if m.wantDiff {
@@ -331,6 +448,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case diffMsg:
 		if msg.rel == m.view.rel && m.view.diff {
 			m.view.setDiff(msg.out, msg.err, msg.first)
+			if m.followLine > 0 {
+				m.view.showFileLine(m.followLine)
+				m.followLine = 0
+			}
 		}
 		return m, nil
 
@@ -388,11 +509,36 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 	m.status = r.status
 	m.tree.setStatus(r.status.Files)
 	m.tree.refresh()
+
+	// files edited since the last poll; the newest one is followed
+	var newest string
+	var newestMod time.Time
+	if m.changedMod != nil {
+		for p, t := range r.mods {
+			if old, ok := m.changedMod[p]; (!ok || t.After(old)) && t.After(newestMod) {
+				newest, newestMod = p, t
+			}
+		}
+	}
+	m.changedMod = r.mods
+	if m.follow && newest != "" && m.mode == modeNormal && newest != m.view.rel {
+		debug.Logf("follow %s", newest)
+		m.tree.reveal(newest)
+		m.view.setQuery("")
+		if m.view.diff || m.tree.changed {
+			cmds = append(cmds, m.openChanged(newest))
+		} else {
+			cmds = append(cmds, m.followOpenCmd(newest))
+		}
+		return tea.Batch(cmds...)
+	}
+
 	if r.rel != "" && r.rel == m.view.rel && m.view.loaded {
 		switch {
 		case r.missing && m.view.note == "":
 			m.view.note = "File was deleted"
 		case !r.missing && (!r.mod.Equal(m.view.mod) || r.size != m.view.size):
+			m.followJump = m.follow
 			cmds = append(cmds, m.loadCmd(r.rel, 0))
 		case m.view.diff:
 			// git state may have changed (e.g. a commit) without touching the file
@@ -499,6 +645,16 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			return m.setFlash("no matches for " + m.view.query)
 		}
 		return nil
+	case "f":
+		m.follow = !m.follow
+		if m.follow {
+			if !m.git.OK {
+				m.follow = false
+				return m.setFlash("follow needs a git repository")
+			}
+			return m.setFlash("follow on: opens files as they change")
+		}
+		return m.setFlash("follow off")
 	case "r":
 		m.tree.refresh()
 		cmds := []tea.Cmd{m.indexCmd()}
@@ -686,6 +842,12 @@ func (m *Model) toggleChangedView() tea.Cmd {
 			v.enterDiff()
 			return m.diffCmd(true)
 		}
+		if !v.loaded || v.rel == "" {
+			// nothing open yet: show the selected (or first) changed file
+			if n := t.selected(); n != nil {
+				return m.openChanged(n.rel)
+			}
+		}
 		return nil
 	}
 	if v.diff {
@@ -694,13 +856,33 @@ func (m *Model) toggleChangedView() tea.Cmd {
 	return nil
 }
 
+// hasChanges reports whether git status lists a file that can be opened.
+func (m *Model) hasChanges() bool {
+	for _, c := range m.status.Files {
+		if c != "D" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) toggleDiff() tea.Cmd {
 	v := m.view
-	if v.rel == "" || !v.loaded {
-		return m.setFlash("open a file first")
-	}
 	if !m.git.OK {
 		return m.setFlash("not a git repository")
+	}
+	if v.rel == "" || !v.loaded {
+		// nothing open yet: list changed files and open the first one's diff
+		if m.tree.changed {
+			if n := m.tree.selected(); n != nil {
+				return m.openChanged(n.rel)
+			}
+			return m.setFlash("no changed files")
+		}
+		if !m.hasChanges() {
+			return m.setFlash("no changed files")
+		}
+		return m.toggleChangedView()
 	}
 	if v.diff {
 		v.leaveDiff(0)
@@ -717,13 +899,20 @@ func (m *Model) openFinder() tea.Cmd {
 	m.mode = modeFinder
 	m.finder.input.SetValue("")
 	m.finder.refilter()
+	m.finder.setRecent(m.recentLists())
 	// refresh the index in the background so new files show up
 	return tea.Batch(m.finder.input.Focus(), m.indexCmd())
 }
 
 func (m *Model) keyFinder(msg tea.KeyPressMsg) tea.Cmd {
 	f := m.finder
-	switch msg.String() {
+	k := msg.String()
+	// with an empty query, digits open a recent file (otherwise they're typed)
+	if i := digitIndex(k); i >= 0 && f.input.Value() == "" && i < len(f.recent) {
+		f.sel = i
+		return m.pickFinder()
+	}
+	switch k {
 	case "esc", "ctrl+p", "super+p":
 		m.closeOverlay()
 	case "up", "ctrl+k", "shift+tab":
@@ -731,16 +920,7 @@ func (m *Model) keyFinder(msg tea.KeyPressMsg) tea.Cmd {
 	case "down", "ctrl+j", "ctrl+n", "tab":
 		f.move(1)
 	case "enter":
-		if rel, ok := f.picked(); ok {
-			line := f.line
-			m.closeOverlay()
-			m.tree.reveal(rel)
-			m.focus = focusViewer
-			if m.view.rel != rel {
-				m.view.setQuery("")
-			}
-			return m.openFile(rel, line)
-		}
+		return m.pickFinder()
 	default:
 		var cmd tea.Cmd
 		f.input, cmd = f.input.Update(msg)
@@ -748,6 +928,23 @@ func (m *Model) keyFinder(msg tea.KeyPressMsg) tea.Cmd {
 		return cmd
 	}
 	return nil
+}
+
+// pickFinder opens the finder's selected file.
+func (m *Model) pickFinder() tea.Cmd {
+	f := m.finder
+	rel, ok := f.picked()
+	if !ok {
+		return nil
+	}
+	line := f.line
+	m.closeOverlay()
+	m.tree.reveal(rel)
+	m.focus = focusViewer
+	if m.view.rel != rel {
+		m.view.setQuery("")
+	}
+	return m.openFile(rel, line)
 }
 
 func (m *Model) openSearch() tea.Cmd {
@@ -968,13 +1165,15 @@ func (m *Model) render() string {
 
 	var treeLines, viewLines []string
 	if tw > 0 {
-		title := " " + sBold.Render(m.name)
-		if m.focus == focusTree {
-			title = " " + sAccent.Bold(true).Render(m.name)
+		b := newBar(m.focus == focusTree)
+		var right string
+		if m.tree.changed {
+			right = b.chip.Render("CHANGED")
 		}
-		treeLines = append([]string{fit(title, tw)}, m.tree.render(tw, m.focus == focusTree && m.mode == modeNormal)...)
+		title := b.fit(b.base.Render(" ")+b.bold.Render(m.name), right, tw)
+		treeLines = append([]string{title}, m.tree.render(tw, m.focus == focusTree && m.mode == modeNormal)...)
 	}
-	viewLines = append([]string{m.view.title(m.view.width, m.status.Files[m.view.rel])},
+	viewLines = append([]string{m.view.title(m.view.width, m.status.Files[m.view.rel], m.focus == focusViewer, m.follow)},
 		m.view.render(m.focus == focusViewer)...)
 
 	var b strings.Builder
@@ -1052,7 +1251,7 @@ func (m *Model) statusBar() string {
 
 func helpBox() string {
 	keys := [][2]string{
-		{"ctrl+p", "find file (add :42 for a line)"},
+		{"ctrl+p", "find file (add :42 for a line); 1-9 0 pick recent"},
 		{"ctrl+f", "search in all files (ripgrep)"},
 		{"tab / shift+tab", "next / previous file in same dir"},
 		{"cmd+← / cmd+→", "focus sidebar / viewer"},
@@ -1071,6 +1270,7 @@ func helpBox() string {
 		{":", "go to line"},
 		{"d", "toggle git diff (enter jumps to line); in sidebar: changed files only"},
 		{"y  Y", "copy path / path:line"},
+		{"f", "follow mode: open files as they change"},
 		{"r", "refresh"},
 		{"esc", "clear search · leave diff · back"},
 		{"q", "quit"},

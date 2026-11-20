@@ -37,6 +37,54 @@ var (
 	sBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(0, 1)
 )
 
+// bar holds the styles for a panel's title bar. Every segment carries the
+// bar's background, so colours inside the bar don't punch holes in it.
+type bar struct {
+	base, dim, bold, chip lipgloss.Style
+	focused               bool
+}
+
+func newBar(focused bool) bar {
+	bg, fg, dim := lipgloss.Color("#23263a"), lipgloss.Color("#c0caf5"), colDim
+	chipBg, chipFg := colAccent, lipgloss.Color("#1a1b26")
+	if focused {
+		bg, fg, dim = colAccent, lipgloss.Color("#1a1b26"), lipgloss.Color("#2e3a5c")
+		chipBg, chipFg = lipgloss.Color("#1a1b26"), colAccent
+	}
+	base := lipgloss.NewStyle().Background(bg).Foreground(fg)
+	return bar{
+		base:    base,
+		dim:     base.Foreground(dim),
+		bold:    base.Bold(true),
+		chip:    lipgloss.NewStyle().Background(chipBg).Foreground(chipFg).Bold(true).Padding(0, 1),
+		focused: focused,
+	}
+}
+
+// mark renders a git status letter on the bar. On the blue bar the usual
+// colours are hard to read, so it uses the bar's text colour.
+func (b bar) mark(code string) string {
+	if b.focused {
+		return b.bold.Render(code)
+	}
+	return gitStyle(code).Background(b.base.GetBackground()).Render(code)
+}
+
+// fit lays out left and right (right-aligned) across exactly w cells,
+// filling the gap with the bar's background.
+func (b bar) fit(left, right string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	rw := ansi.StringWidth(right)
+	if rw >= w {
+		right, rw = "", 0
+	}
+	left = ansi.Truncate(left, w-rw, b.base.Render("…"))
+	pad := w - rw - ansi.StringWidth(left)
+	return left + b.base.Render(strings.Repeat(" ", max(0, pad))) + right
+}
+
 // gitStyle colours a git status letter.
 func gitStyle(code string) lipgloss.Style {
 	switch code {

@@ -1,7 +1,8 @@
 # lens
 
 A minimal, read-only repo viewer for the terminal, made to sit in a split next to Claude Code.
-Sidebar file tree, syntax-highlighted viewer, VS Code-style quick open, search, and git diffs.
+Sidebar file tree, syntax-highlighted viewer, VS Code-style quick open, search, git diffs, and a follow
+mode that jumps to whatever Claude just edited.
 
 <img width="983" height="960" alt="Screenshot 2026-11-20 at 12 25 13" src="https://github.com/user-attachments/assets/9fd0dcc4-51cc-4ffc-bfe8-f2fe6e815cce" />
 
@@ -25,7 +26,7 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 
 | Key | Action |
 | --- | --- |
-| `ctrl+p` | Find file (fuzzy, top 5). Add `:42` to jump to a line |
+| `ctrl+p` | Find file (fuzzy, top 5). Add `:42` to jump to a line. With an empty query it lists 5 recently changed and 5 recently viewed files: press `1`–`9`, `0` to open one |
 | `ctrl+f` | Search text in all files, enter jumps to the line |
 | `tab` / `shift+tab` | Next / previous file in the same directory |
 | `cmd+←` / `cmd+→` | Focus sidebar / viewer |
@@ -45,6 +46,7 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | `:` | Go to line |
 | `d` | Toggle git diff vs HEAD (enter jumps to that line). In the sidebar: list changed files only; enter opens a file's diff |
 | `y` / `Y` | Copy path / `path:line` (paste into Claude) |
+| `f` | Follow mode: when a file changes, open it at the edited line (needs git) |
 | `r` | Refresh |
 | `esc` | Clear search · leave diff · back to sidebar |
 | `?` | Help |
@@ -77,6 +79,40 @@ terminal sends it as `super+shift+f`).
 lens checks the open file and `git status` once a second. When Claude edits a file, the viewer reloads
 it in place, and the sidebar shows git markers: `M` modified, `A` added, `?` untracked, `D` deleted, `•` folder
 contains changes. It runs git with `GIT_OPTIONAL_LOCKS=0`, so it never blocks git commands in the other pane.
+
+## Follow mode
+
+Press `f` to turn on follow mode (a green `FOLLOW` badge shows in the status bar). Whenever a file is
+edited, lens opens it and puts the cursor on the change, so the viewer keeps up with Claude while you read:
+
+- If the open file changes, the cursor moves to the first line that's different from what was on screen.
+- If another file changes, lens switches to it, selects it in the sidebar, and lands on its first change
+  against HEAD.
+- In diff view (or the changed-files sidebar), files open in diff view at the hunk that was just edited.
+- It doesn't jump while Ctrl+P, Ctrl+F or a prompt is open.
+
+Follow mode works from `git status`, so it needs a git repository and only sees files that differ from HEAD.
+Press `f` again to turn it off.
+
+## Recent files
+
+Press Ctrl+P and don't type anything to see two numbered lists:
+
+```
+  Recently changed
+› 1  model.go  internal/ui/          M  now
+  2  finder.go  internal/ui/         M   3m
+  Recently viewed
+  3  README.md                       M
+  4  git.go  internal/files/
+```
+
+- **Recently changed** shows up to 5 files from `git status`, newest edit first, with their git status
+  and how long ago they changed.
+- **Recently viewed** shows up to 5 files you've opened, newest first, leaving out the file that's open now.
+
+Press `1`–`9` or `0` to open one, or use the arrow keys and enter. Once you've typed something, digits go
+into the search as normal.
 
 ## Performance and the debug log
 

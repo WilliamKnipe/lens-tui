@@ -2,9 +2,11 @@ package ui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -148,5 +150,143 @@ func TestViewerScrollVsMove(t *testing.T) {
 	}
 	if v.cur != len(v.lines)-1 {
 		t.Fatalf("scroll to end: cur=%d", v.cur)
+	}
+}
+
+func TestFirstChangedLine(t *testing.T) {
+	diff := "@@ -10,7 +10,8 @@ func x\n a\n b\n c\n+new\n d\n"
+	if n := firstChangedLine(diff); n != 13 {
+		t.Errorf("firstChangedLine = %d, want 13", n)
+	}
+	if n := firstChangedLine(""); n != 0 {
+		t.Errorf("empty diff = %d", n)
+	}
+	if n := firstDiffLine([]string{"a", "b", "c"}, []string{"a", "B", "c"}); n != 2 {
+		t.Errorf("firstDiffLine changed = %d", n)
+	}
+	if n := firstDiffLine([]string{"a"}, []string{"a", "b"}); n != 2 {
+		t.Errorf("firstDiffLine appended = %d", n)
+	}
+	if n := firstDiffLine([]string{"a"}, []string{"a"}); n != 0 {
+		t.Errorf("firstDiffLine same = %d", n)
+	}
+}
+
+// TestFollowAndRecent: follow opens a file edited since the last poll at
+// its edited line, and the finder lists it as recently changed, picked with "1".
+func TestFollowAndRecent(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644)
+	}
+	write("a.txt", "one\ntwo\nthree\n")
+	write("b.txt", "x\ny\nz\n")
+
+	m := New(dir, "")
+	m.git.OK = true // follow needs git; the poll results below are faked
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.loadCmd("a.txt", 0)())
+
+	t0 := time.Now().Add(-time.Minute)
+	poll := func(mods map[string]time.Time) tea.Cmd {
+		st := files.Status{Files: map[string]string{}}
+		for p := range mods {
+			st.Files[p] = "M"
+		}
+		return m.handlePoll(pollResultMsg{status: st, mods: mods})
+	}
+	poll(map[string]time.Time{"a.txt": t0}) // baseline
+	m.handleKey(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if !m.follow {
+		t.Fatal("follow not on")
+	}
+
+	write("b.txt", "x\ny\nZ\n")
+	cmd := poll(map[string]time.Time{"a.txt": t0, "b.txt": time.Now()})
+	// run the batch and feed back the loaded file
+	for _, msg := range runBatch(cmd) {
+		if lm, ok := msg.(loadedMsg); ok {
+			lm.target = firstDiffLine([]string{"x", "y", "z"}, lm.content.Lines) // no git here
+			m.Update(lm)
+		}
+	}
+	if m.view.rel != "b.txt" || m.view.cur != 2 {
+		t.Fatalf("follow: rel=%q cur=%d", m.view.rel, m.view.cur)
+	}
+
+	m.handleKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	if len(m.finder.recent) != 3 || m.finder.recent[0].rel != "b.txt" || m.finder.recent[2].rel != "a.txt" {
+		t.Fatalf("recent = %+v", m.finder.recent)
+	}
+	if !strings.Contains(ansi.Strip(m.render()), "Recently viewed") {
+		t.Error("recent lists not rendered")
+	}
+	cmd = m.handleKey(tea.KeyPressMsg{Code: '3', Text: "3"})
+	if m.mode != modeNormal || cmd == nil {
+		t.Fatal("digit did not pick")
+	}
+	m.Update(cmd())
+	if m.view.rel != "a.txt" {
+		t.Fatalf("picked %q", m.view.rel)
+	}
+}
+
+// runBatch runs a command and any batch it returns, collecting messages.
+// Tick commands are skipped.
+func runBatch(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(200 * time.Millisecond):
+		return nil // a tick
+	}
+	if b, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range b {
+			out = append(out, runBatch(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
+// TestDiffWithNoFileOpen: "d" with nothing open lists changed files and
+// opens the first one in diff view.
+func TestDiffWithNoFileOpen(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("two\n"), 0o644)
+	git("add", ".")
+	git("commit", "-qm", "init")
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("TWO\n"), 0o644)
+
+	for _, focus := range []focusArea{focusTree, focusViewer} {
+		m := New(dir, "")
+		m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+		m.Update(m.pollCmd()())
+		m.focus = focus
+		for _, msg := range runBatch(m.handleKey(tea.KeyPressMsg{Code: 'd', Text: "d"})) {
+			if _, ok := msg.(loadedMsg); ok {
+				for _, dm := range runBatch(func() tea.Msg { _, c := m.Update(msg); return c() }) {
+					m.Update(dm)
+				}
+			}
+		}
+		if !m.tree.changed || m.view.rel != "b.txt" || !m.view.diff || len(m.view.diffLines) == 0 {
+			t.Fatalf("focus %d: changed=%v rel=%q diff=%v lines=%d", focus, m.tree.changed, m.view.rel, m.view.diff, len(m.view.diffLines))
+		}
 	}
 }

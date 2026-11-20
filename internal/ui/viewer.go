@@ -239,6 +239,17 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 	v.clamp()
 }
 
+// showFileLine moves the diff cursor to the first diff line at or after
+// 1-based file line n.
+func (v *viewer) showFileLine(n int) {
+	for i, num := range v.diffNums {
+		if num >= n {
+			v.moveTo(i)
+			return
+		}
+	}
+}
+
 func (v *viewer) enterDiff() {
 	v.fileCur, v.fileOff = v.cur, v.off
 	v.diff = true
@@ -350,22 +361,27 @@ func (v *viewer) gutterWidth() int {
 }
 
 // title is the header line above the content.
-func (v *viewer) title(w int, gitMark string) string {
+func (v *viewer) title(w int, gitMark string, focused, follow bool) string {
+	b := newBar(focused)
+	var right string
+	if follow {
+		right = b.chip.Render("FOLLOW") + b.base.Render(" ")
+	}
 	if v.rel == "" {
-		return fit(sDim.Render(" no file open"), w)
+		return b.fit(b.dim.Render(" no file open"), right, w)
 	}
 	dir, name := path.Split(v.rel)
-	t := " " + sDim.Render(dir) + sBold.Render(name)
+	t := b.base.Render(" ") + b.dim.Render(dir) + b.bold.Render(name)
 	if gitMark != "" {
-		t += " " + gitStyle(gitMark).Render(gitMark)
+		t += b.base.Render(" ") + b.mark(gitMark)
 	}
 	if v.diff {
-		t += "  " + sChip.Render("DIFF")
+		t += b.base.Render("  ") + b.chip.Render("DIFF")
 	}
 	if v.xoff > 0 {
-		t += sDim.Render(fmt.Sprintf("  →%d", v.xoff))
+		t += b.dim.Render(fmt.Sprintf("  →%d", v.xoff))
 	}
-	return fit(t, w)
+	return b.fit(t, right, w)
 }
 
 // render returns exactly v.height lines of width v.width.
