@@ -119,8 +119,9 @@ type Model struct {
 	flashSeq      int
 	findOrigin    int // cursor line when "/" was pressed, restored on esc
 	startFile     string
-	wantDiff      bool // open the next loaded file in diff view
-	themeFixed    bool // LENS_THEME set: don't follow the terminal background
+	wantDiff      bool   // open the next loaded file in diff view
+	wantRel       string // the file most recently asked for; older loads are dropped
+	themeFixed    bool   // LENS_THEME set: don't follow the terminal background
 	pollEvery     time.Duration
 
 	changedMod map[string]time.Time // last poll's mtimes of changed files (nil before the first poll)
@@ -129,6 +130,10 @@ type Model struct {
 	follow     bool                 // follow mode: open whatever file was just edited
 	followJump bool                 // next reload of the open file: jump to the edited line
 	followLine int                  // 1-based line to show once the diff view reloads
+
+	// an edit seen while a popup was open, followed once it closes
+	pendingFollow     string
+	pendingFollowLine int
 
 	// last known contents of changed files, so follow mode can find what an
 	// edit touched rather than the first change against HEAD
@@ -198,6 +203,7 @@ const deferHighlightLines = 1500
 
 func (m *Model) loadCmd(rel string, target int) tea.Cmd {
 	root := m.root
+	m.wantRel = rel
 	deferAt := deferHighlightLines
 	if rel == m.view.rel {
 		deferAt = 0
@@ -362,7 +368,9 @@ func copyCmd(s string) tea.Cmd {
 
 // openFile shows rel in the viewer, jumping to line (1-based) if > 0.
 func (m *Model) openFile(rel string, line int) tea.Cmd {
+	m.wantDiff = false
 	if rel == m.view.rel && m.view.loaded {
+		m.wantRel = rel // drop any load still on its way
 		if m.view.diff {
 			m.view.leaveDiff(0)
 		}
@@ -378,6 +386,7 @@ func (m *Model) openFile(rel string, line int) tea.Cmd {
 // openChanged opens a file from the changed-files list straight into its diff.
 func (m *Model) openChanged(rel string) tea.Cmd {
 	if rel == m.view.rel && m.view.loaded {
+		m.wantRel, m.wantDiff = rel, false
 		if !m.view.diff {
 			m.view.enterDiff()
 		}
@@ -391,6 +400,7 @@ func (m *Model) openChanged(rel string) tea.Cmd {
 // edited line, 1-based), or on its first change against HEAD if line is 0.
 func (m *Model) followOpenCmd(rel string, line int) tea.Cmd {
 	g, root, untracked := m.git, m.root, m.status.Files[rel] == "?"
+	m.wantRel, m.wantDiff = rel, false
 	return func() tea.Msg {
 		c := files.Load(root, rel, deferHighlightLines)
 		if line == 0 {
@@ -491,8 +501,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		if !m.themeFixed && !msg.IsDark() {
 			files.SetTheme("github")
-			if m.view.rel != "" {
-				return m, m.loadCmd(m.view.rel, 0)
+			if m.wantRel != "" {
+				return m, m.loadCmd(m.wantRel, 0)
 			}
 		}
 		return m, nil
@@ -504,6 +514,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loadedMsg:
+		// drop loads overtaken by a newer request, or an older read of the open file
+		if msg.rel != m.wantRel ||
+			msg.rel == m.view.rel && m.view.loaded && msg.content.ModTime.Before(m.view.mod) {
+			return m, nil
+		}
 		if msg.rel != m.view.rel {
 			m.pushViewed(msg.rel)
 		}
@@ -639,6 +654,23 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 	}
 	m.changedMod = r.mods
 	edited := m.updateSnaps(r, newest)
+	switch {
+	case !m.follow:
+		m.pendingFollow = ""
+	case m.mode != modeNormal:
+		// a popup is open: remember the edit and follow it once it closes
+		if newest != "" {
+			m.pendingFollow, m.pendingFollowLine = newest, edited
+		}
+		newest = ""
+	case newest == "" && m.pendingFollow != "":
+		if _, ok := r.mods[m.pendingFollow]; ok {
+			newest, edited = m.pendingFollow, m.pendingFollowLine
+		}
+		m.pendingFollow = ""
+	default:
+		m.pendingFollow = ""
+	}
 	if m.follow && newest != "" && m.mode == modeNormal && newest != m.view.rel {
 		debug.Logf("follow %s", newest)
 		m.tree.reveal(newest)
@@ -652,7 +684,8 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	if r.rel != "" && r.rel == m.view.rel && m.view.loaded {
+	// (skipped while another file is loading, so it isn't overridden)
+	if r.rel != "" && r.rel == m.view.rel && m.view.loaded && m.wantRel == m.view.rel {
 		switch {
 		case r.missing && m.view.note == "":
 			m.view.note = "File was deleted"
@@ -781,8 +814,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "r":
 		m.tree.refresh()
 		cmds := []tea.Cmd{m.indexCmd()}
-		if m.view.rel != "" {
-			cmds = append(cmds, m.loadCmd(m.view.rel, 0))
+		if m.wantRel != "" {
+			cmds = append(cmds, m.loadCmd(m.wantRel, 0))
 		}
 		return tea.Batch(append(cmds, m.setFlash("refreshed"))...)
 	}
@@ -917,10 +950,8 @@ func (m *Model) cycleFile(d int) tea.Cmd {
 	case m.view.diff && !t.changed:
 		// diff view: only files with changes to show
 		list = nil
-		for p, c := range m.status.Files {
-			if c != "D" {
-				list = append(list, p)
-			}
+		for p := range m.status.Files {
+			list = append(list, p)
 		}
 		sort.Slice(list, func(i, j int) bool { return treeLess(list[i], list[j]) })
 	case t.changed || len(list) == 0:
@@ -1019,14 +1050,9 @@ func (m *Model) toggleChangedView() tea.Cmd {
 	return nil
 }
 
-// hasChanges reports whether git status lists a file that can be opened.
+// hasChanges reports whether git status lists any changed file.
 func (m *Model) hasChanges() bool {
-	for _, c := range m.status.Files {
-		if c != "D" {
-			return true
-		}
-	}
-	return false
+	return len(m.status.Files) > 0
 }
 
 func (m *Model) toggleDiff() tea.Cmd {
@@ -1283,6 +1309,9 @@ func (m *Model) handleClick(ms tea.Mouse) tea.Cmd {
 		if n.isDir {
 			m.tree.toggle()
 			return nil
+		}
+		if m.tree.changed {
+			return m.openChanged(n.rel)
 		}
 		return m.openFile(n.rel, 0)
 	}

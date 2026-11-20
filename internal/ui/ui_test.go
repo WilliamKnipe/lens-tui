@@ -549,3 +549,124 @@ func TestCmdArrowsHalfPage(t *testing.T) {
 		}
 	}
 }
+
+// TestStaleLoadDropped: a slow load that finishes after a newer request
+// must not replace the file that was asked for last.
+func TestStaleLoadDropped(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b\n"), 0o644)
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	slow := m.openFile("a.txt", 0)
+	fast := m.openFile("b.txt", 0)
+	m.Update(fast())
+	m.Update(slow()) // arrives last
+	if m.view.rel != "b.txt" {
+		t.Fatalf("showing %q, want b.txt", m.view.rel)
+	}
+	// going back to the open file also cancels a load on its way
+	slow = m.openFile("a.txt", 0)
+	m.openFile("b.txt", 0)
+	m.Update(slow())
+	if m.view.rel != "b.txt" {
+		t.Fatalf("showing %q after returning to b.txt", m.view.rel)
+	}
+}
+
+// TestFollowAfterPopup: an edit made while ctrl+p is open is followed once
+// the popup closes, rather than lost.
+func TestFollowAfterPopup(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b\n"), 0o644)
+	m := New(dir, "")
+	m.git.OK = true
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.loadCmd("a.txt", 0)())
+	t0 := time.Now().Add(-time.Minute)
+	poll := func(mods map[string]time.Time) tea.Cmd {
+		st := files.Status{Files: map[string]string{}}
+		for p := range mods {
+			st.Files[p] = "M"
+		}
+		return m.handlePoll(pollResultMsg{status: st, mods: mods, rel: m.view.rel})
+	}
+	poll(map[string]time.Time{"a.txt": t0})
+	m.handleKey(tea.KeyPressMsg{Code: 'f', Text: "f"})
+
+	m.handleKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	edit := time.Now()
+	poll(map[string]time.Time{"a.txt": t0, "b.txt": edit})
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	for _, msg := range runBatch(poll(map[string]time.Time{"a.txt": t0, "b.txt": edit})) {
+		if lm, ok := msg.(loadedMsg); ok {
+			m.Update(lm)
+		}
+	}
+	if m.view.rel != "b.txt" {
+		t.Fatalf("follow after popup: showing %q, want b.txt", m.view.rel)
+	}
+}
+
+// TestClickChangedOpensDiff: clicking a file in the changed-files sidebar
+// opens its diff, like enter does.
+func TestClickChangedOpensDiff(t *testing.T) {
+	m := New(t.TempDir(), "")
+	m.git.OK = true
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.tree.setStatus(map[string]string{"x.go": "M"})
+	m.tree.toggleChanged()
+	m.handleClick(tea.Mouse{X: 2, Y: 1, Button: tea.MouseLeft})
+	if !m.wantDiff || m.wantRel != "x.go" {
+		t.Fatalf("click: wantDiff=%v wantRel=%q", m.wantDiff, m.wantRel)
+	}
+}
+
+// TestDiffTabsMatchFile: tabs in diff lines expand after the +/-/space
+// marker, so indentation matches the file view.
+func TestDiffTabsMatchFile(t *testing.T) {
+	v := &viewer{height: 10, width: 80, diff: true}
+	v.setDiff("@@ -1,2 +1,2 @@\n \tkeep\n-\told\n+\tnew\n", nil, false)
+	want := files.SplitLines("\tx\n")[0][:4] // the file view's indent
+	for _, l := range v.diffPlain[1:] {
+		if l[1:5] != want || l[5] == ' ' {
+			t.Fatalf("diff line %q: indent differs from the file view", l)
+		}
+	}
+}
+
+// TestDeletedFileInChangedList: deleted files are listed and their diff shows.
+func TestDeletedFileInChangedList(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	os.WriteFile(filepath.Join(dir, "gone.txt"), []byte("bye\n"), 0o644)
+	git("add", ".")
+	git("commit", "-qm", "init")
+	os.Remove(filepath.Join(dir, "gone.txt"))
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.pollCmd()())
+	m.focus = focusTree
+	for _, msg := range runBatch(m.handleKey(tea.KeyPressMsg{Code: 'd', Text: "d"})) {
+		_, c := m.Update(msg)
+		for _, dm := range runBatch(c) {
+			m.Update(dm)
+		}
+	}
+	if len(m.tree.rows) != 1 || m.view.rel != "gone.txt" || !m.view.diff {
+		t.Fatalf("rows=%d rel=%q diff=%v", len(m.tree.rows), m.view.rel, m.view.diff)
+	}
+	out := ansi.Strip(strings.Join(m.view.render(true), "\n"))
+	if !strings.Contains(out, "-bye") {
+		t.Fatalf("deleted file's diff not shown:\n%s", out)
+	}
+}

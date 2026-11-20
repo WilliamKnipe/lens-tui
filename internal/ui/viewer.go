@@ -242,6 +242,24 @@ func (v *viewer) highlightDiff() {
 	}
 }
 
+// splitDiff splits diff output into lines, expanding tabs in the code after
+// each line's +/-/space marker so tab stops match the file view.
+func splitDiff(out string) []string {
+	out = strings.ReplaceAll(out, "\r\n", "\n")
+	lines := strings.Split(out, "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i, l := range lines {
+		if l != "" && strings.IndexByte("+- \\", l[0]) >= 0 {
+			lines[i] = l[:1] + files.ExpandTabs(l[1:])
+		} else {
+			lines[i] = files.ExpandTabs(l)
+		}
+	}
+	return lines
+}
+
 // setDiff loads `git diff` output. Header lines before the first hunk are dropped.
 func (v *viewer) setDiff(out string, err error, first bool) {
 	v.diffLines, v.diffPlain, v.diffNums, v.diffNote = nil, nil, nil, ""
@@ -249,7 +267,7 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 		v.diffNote = "git diff failed: " + err.Error()
 	}
 	inHunk, n := false, 0
-	for _, l := range files.SplitLines(out) {
+	for _, l := range splitDiff(out) {
 		if m := hunkRe.FindStringSubmatch(l); m != nil {
 			inHunk = true
 			n, _ = strconv.Atoi(m[1])
@@ -447,7 +465,8 @@ func (v *viewer) title(w int, gitMark string, focused, follow bool) string {
 func (v *viewer) render(focused bool) []string {
 	out := make([]string, 0, v.height)
 	note := v.note
-	if v.diff && v.diffNote != "" {
+	if v.diff {
+		// the diff has its own note; a deleted file's "cannot open" doesn't apply
 		note = v.diffNote
 	}
 	if !v.loaded || note != "" || v.count() == 0 {
@@ -491,7 +510,7 @@ func (v *viewer) render(focused bool) []string {
 		}
 		marker := " "
 		if i == v.cur && focused {
-			marker = sAccent.Render("▎")
+			marker = sCurNum.Render("▌") // same orange as the line number
 		}
 		var num string
 		if v.diff {

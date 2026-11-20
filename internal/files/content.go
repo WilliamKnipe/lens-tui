@@ -2,7 +2,9 @@ package files
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,9 @@ type Content struct {
 func Load(root, rel string, deferLines int) Content {
 	abs := filepath.Join(root, filepath.FromSlash(rel))
 	fi, err := os.Stat(abs)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Content{Note: "File was deleted (d shows the diff)"}
+	}
 	if err != nil {
 		return Content{Note: "Cannot open: " + err.Error()}
 	}

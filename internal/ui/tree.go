@@ -91,7 +91,7 @@ func (t *tree) rebuild() {
 		}
 		t.changedRows = t.changedRows[:0]
 		for p, c := range t.marks {
-			if c == "•" || c == "D" {
+			if c == "•" { // a folder holding changes
 				continue
 			}
 			n := old[p]
