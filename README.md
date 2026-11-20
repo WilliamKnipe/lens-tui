@@ -28,7 +28,7 @@ No other tools needed. If [ripgrep](https://github.com/BurntSushi/ripgrep) is in
 | --- | --- |
 | `ctrl+p` | Find file (fuzzy, top 5). Add `:42` to jump to a line. With an empty query it lists 5 recently changed and 5 recently viewed files: press `1`–`9`, `0` to open one |
 | `ctrl+f` | Search text in all files, enter jumps to the line |
-| `tab` / `shift+tab` | Next / previous file in the same directory |
+| `tab` / `shift+tab` | Next / previous file, through all folders in sidebar order (only changed files in diff view or the changed-files sidebar) |
 | `cmd+←` / `cmd+→` | Focus sidebar / viewer |
 | `ctrl+b` | Hide / show sidebar |
 | `j` `k` `↑` `↓` | Scroll the file (move in the sidebar) |
@@ -86,10 +86,15 @@ Press `f` to turn on follow mode (a green `FOLLOW` badge shows in the status bar
 edited, lens opens it and puts the cursor on the change, so the viewer keeps up with Claude while you read:
 
 - If the open file changes, the cursor moves to the first line that's different from what was on screen.
-- If another file changes, lens switches to it, selects it in the sidebar, and lands on its first change
-  against HEAD.
+- If another file changes, lens switches to it, selects it in the sidebar, and lands on the line that was
+  just edited (or its first change against HEAD, the first time lens sees the file change).
+- The edited line is shown about 10 lines below the top of the view, so you can see what's above it.
 - In diff view (or the changed-files sidebar), files open in diff view at the hunk that was just edited.
 - It doesn't jump while Ctrl+P, Ctrl+F or a prompt is open.
+
+Changed lines are highlighted in the normal view too, not just in diff view: a green bar in the gutter
+for added lines, yellow for modified lines, and a red `▔` where lines were removed. New files aren't
+highlighted, since every line would be.
 
 Follow mode works from `git status`, so it needs a git repository and only sees files that differ from HEAD.
 Press `f` again to turn it off.

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +64,11 @@ type (
 		rel     string
 		content files.Content
 		target  int
+		follow  bool // target is an edit: show it with context above
+	}
+	changesMsg struct {
+		rel   string
+		marks map[int]byte
 	}
 	colouredMsg struct {
 		rel    string
@@ -85,6 +90,7 @@ type (
 		size    int64
 		missing bool
 		gitTook time.Duration
+		texts   map[string][]string // new contents of changed files edited since their last snapshot
 	}
 	flashClearMsg struct{ seq int }
 	copiedMsg     struct {
@@ -119,10 +125,21 @@ type Model struct {
 
 	changedMod map[string]time.Time // last poll's mtimes of changed files (nil before the first poll)
 	viewed     []string             // recently opened files, newest first
+	allFiles   []string             // the file index in sidebar order, for tab
 	follow     bool                 // follow mode: open whatever file was just edited
 	followJump bool                 // next reload of the open file: jump to the edited line
 	followLine int                  // 1-based line to show once the diff view reloads
+
+	// last known contents of changed files, so follow mode can find what an
+	// edit touched rather than the first change against HEAD
+	snaps   map[string][]string
+	snapMod map[string]time.Time
 }
+
+const (
+	maxSnapSize     = 512 << 10 // larger files are not snapshotted
+	maxSnapsPerPoll = 200
+)
 
 const maxViewed = 20
 
@@ -190,7 +207,7 @@ func (m *Model) loadCmd(rel string, target int) tea.Cmd {
 		c := files.Load(root, rel, deferAt)
 		debug.Since("open", start, 200*time.Millisecond, false, fmt.Sprintf("%s  %d lines  %d KB  %s %s",
 			rel, len(c.Lines), c.Size/1024, highlightInfo(c), c.Note))
-		return loadedMsg{rel, c, target}
+		return loadedMsg{rel, c, target, false}
 	}
 }
 
@@ -225,10 +242,30 @@ func (m *Model) diffCmd(first bool) tea.Cmd {
 	}
 }
 
+// changesCmd fetches the change marks for the open file. New files get none:
+// every line would be marked.
+func (m *Model) changesCmd() tea.Cmd {
+	g, rel, code := m.git, m.view.rel, m.status.Files[m.view.rel]
+	if code == "" || code == "?" || code == "A" || code == "D" || !g.OK {
+		return func() tea.Msg { return changesMsg{rel: rel} }
+	}
+	return func() tea.Msg {
+		out, err := g.Diff(rel, false)
+		if err != nil {
+			return changesMsg{rel: rel}
+		}
+		return changesMsg{rel, changeMarks(out)}
+	}
+}
+
 // pollCmd checks git status and the open file's mtime. The next poll is
 // scheduled only after this one returns, so slow repos never pile up.
 func (m *Model) pollCmd() tea.Cmd {
 	g, root, rel := m.git, m.root, m.view.rel
+	snapMod := make(map[string]time.Time, len(m.snapMod))
+	for p, t := range m.snapMod {
+		snapMod[p] = t
+	}
 	return func() tea.Msg {
 		start := time.Now()
 		r := pollResultMsg{status: g.Status(), rel: rel}
@@ -242,6 +279,7 @@ func (m *Model) pollCmd() tea.Cmd {
 				r.mods[p] = fi.ModTime()
 			}
 		}
+		r.texts = readSnaps(root, r.mods, snapMod)
 		if rel != "" {
 			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err == nil {
 				r.mod, r.size = fi.ModTime(), fi.Size()
@@ -251,6 +289,55 @@ func (m *Model) pollCmd() tea.Cmd {
 		}
 		return r
 	}
+}
+
+// readSnaps reads the changed files whose mtime differs from their last
+// snapshot. Big and binary files are skipped.
+func readSnaps(root string, mods, snapMod map[string]time.Time) map[string][]string {
+	out := map[string][]string{}
+	for p, t := range mods {
+		if len(out) >= maxSnapsPerPoll {
+			break
+		}
+		if old, ok := snapMod[p]; ok && old.Equal(t) {
+			continue
+		}
+		abs := filepath.Join(root, filepath.FromSlash(p))
+		if fi, err := os.Stat(abs); err != nil || fi.Size() > maxSnapSize {
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil || files.IsBinary(data) {
+			continue
+		}
+		out[p] = files.SplitLines(string(data))
+	}
+	return out
+}
+
+// updateSnaps stores the polled file contents and drops snapshots of files
+// that are no longer changed. It returns the first line of newest that
+// differs from its previous snapshot (0 if unknown).
+func (m *Model) updateSnaps(r pollResultMsg, newest string) int {
+	if m.snaps == nil {
+		m.snaps, m.snapMod = map[string][]string{}, map[string]time.Time{}
+	}
+	line := 0
+	if old, ok := m.snaps[newest]; ok {
+		if cur, ok := r.texts[newest]; ok {
+			line = firstDiffLine(old, cur)
+		}
+	}
+	for p, lines := range r.texts {
+		m.snaps[p], m.snapMod[p] = lines, r.mods[p]
+	}
+	for p := range m.snaps {
+		if _, ok := r.mods[p]; !ok {
+			delete(m.snaps, p)
+			delete(m.snapMod, p)
+		}
+	}
+	return line
 }
 
 func (m *Model) setFlash(s string) tea.Cmd {
@@ -299,14 +386,17 @@ func (m *Model) openChanged(rel string) tea.Cmd {
 	return m.loadCmd(rel, 0)
 }
 
-// followOpenCmd loads rel for follow mode and puts the cursor on its first
-// change against HEAD.
-func (m *Model) followOpenCmd(rel string) tea.Cmd {
+// followOpenCmd loads rel for follow mode and puts the cursor on line (the
+// edited line, 1-based), or on its first change against HEAD if line is 0.
+func (m *Model) followOpenCmd(rel string, line int) tea.Cmd {
 	g, root, untracked := m.git, m.root, m.status.Files[rel] == "?"
 	return func() tea.Msg {
 		c := files.Load(root, rel, deferHighlightLines)
-		out, _ := g.Diff(rel, untracked)
-		return loadedMsg{rel, c, firstChangedLine(out)}
+		if line == 0 {
+			out, _ := g.Diff(rel, untracked)
+			line = firstChangedLine(out)
+		}
+		return loadedMsg{rel, c, line, true}
 	}
 }
 
@@ -408,6 +498,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case indexMsg:
 		m.finder.setFiles(msg.files)
+		m.allFiles = append([]string(nil), msg.files...)
+		sort.Slice(m.allFiles, func(i, j int) bool { return treeLess(m.allFiles[i], m.allFiles[j]) })
 		return m, nil
 
 	case loadedMsg:
@@ -420,23 +512,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.view.diff {
 					m.followLine = line // applied when the diff reloads
 				} else {
-					msg.target = line
+					msg.target, msg.follow = line, true
 				}
 			}
 		}
-		m.view.setFile(msg.rel, msg.content, msg.target)
+		target := msg.target
+		if msg.follow {
+			target = 0
+		}
+		m.view.setFile(msg.rel, msg.content, target)
+		if msg.follow && msg.target > 0 {
+			m.view.reveal(msg.target - 1)
+			m.view.syncMatch()
+		}
 		var cmds []tea.Cmd
+		diffing := false
 		if m.wantDiff {
-			m.wantDiff = false
+			m.wantDiff, diffing = false, true
 			m.view.enterDiff()
 			cmds = append(cmds, m.diffCmd(true))
 		}
 		if msg.content.Pending {
 			cmds = append(cmds, m.colourCmd(msg.rel, msg.content))
-		} else if m.view.diff {
+		} else if m.view.diff && !diffing {
 			cmds = append(cmds, m.diffCmd(false))
 		}
+		if !m.view.diff {
+			cmds = append(cmds, m.changesCmd())
+		}
 		return m, tea.Batch(cmds...)
+
+	case changesMsg:
+		if msg.rel == m.view.rel {
+			m.view.marks = msg.marks
+		}
+		return m, nil
 
 	case colouredMsg:
 		// apply only if the same version of the file is still showing
@@ -448,6 +558,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case diffMsg:
 		if msg.rel == m.view.rel && m.view.diff {
 			m.view.setDiff(msg.out, msg.err, msg.first)
+			if msg.err == nil && m.status.Files[msg.rel] != "?" && m.status.Files[msg.rel] != "A" {
+				m.view.marks = changeMarks(msg.out)
+			} else {
+				m.view.marks = nil
+			}
 			if m.followLine > 0 {
 				m.view.showFileLine(m.followLine)
 				m.followLine = 0
@@ -506,6 +621,7 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 	cmds := []tea.Cmd{tea.Tick(m.pollEvery, func(time.Time) tea.Msg { return pollMsg{} })}
 	start := time.Now()
 	defer func() { debug.Since("tree refresh", start, 50*time.Millisecond, true, "") }()
+	oldCode := m.status.Files[m.view.rel]
 	m.status = r.status
 	m.tree.setStatus(r.status.Files)
 	m.tree.refresh()
@@ -521,14 +637,16 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		}
 	}
 	m.changedMod = r.mods
+	edited := m.updateSnaps(r, newest)
 	if m.follow && newest != "" && m.mode == modeNormal && newest != m.view.rel {
 		debug.Logf("follow %s", newest)
 		m.tree.reveal(newest)
 		m.view.setQuery("")
 		if m.view.diff || m.tree.changed {
+			m.followLine = edited // 0: openChanged starts on the first change
 			cmds = append(cmds, m.openChanged(newest))
 		} else {
-			cmds = append(cmds, m.followOpenCmd(newest))
+			cmds = append(cmds, m.followOpenCmd(newest, edited))
 		}
 		return tea.Batch(cmds...)
 	}
@@ -543,6 +661,8 @@ func (m *Model) handlePoll(r pollResultMsg) tea.Cmd {
 		case m.view.diff:
 			// git state may have changed (e.g. a commit) without touching the file
 			cmds = append(cmds, m.diffCmd(false))
+		case oldCode != r.status.Files[r.rel]:
+			cmds = append(cmds, m.changesCmd()) // e.g. committed or reverted
 		}
 	}
 	return tea.Batch(cmds...)
@@ -611,9 +731,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.focus = focusViewer
 		return nil
 	case "tab":
-		return m.cycleSibling(1)
+		return m.cycleFile(1)
 	case "shift+tab":
-		return m.cycleSibling(-1)
+		return m.cycleFile(-1)
 	case "y":
 		if p := m.currentPath(); p != "" {
 			return copyCmd(p)
@@ -780,40 +900,80 @@ func (m *Model) keyViewer(k string) tea.Cmd {
 	return nil
 }
 
-// cycleSibling opens the next (d=1) or previous (d=-1) file in the same
-// directory as the open file, wrapping around. Focus is left alone.
-func (m *Model) cycleSibling(d int) tea.Cmd {
+// cycleFile opens the next (d=1) or previous (d=-1) file in sidebar order,
+// across all folders, wrapping around. In diff view or the changed-files
+// sidebar it cycles through the changed files only. Focus is left alone.
+func (m *Model) cycleFile(d int) tea.Cmd {
 	t := m.tree
 	cur := m.view.rel
-	if cur == "" {
-		if n := t.selected(); n != nil && !n.isDir {
-			cur = n.rel
+	if n := t.selected(); cur == "" && n != nil && !n.isDir {
+		cur = n.rel
+	}
+	list, sorted := m.allFiles, true
+	switch {
+	case m.view.diff && !t.changed:
+		// diff view: only files with changes to show
+		list = nil
+		for p, c := range m.status.Files {
+			if c != "D" {
+				list = append(list, p)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return treeLess(list[i], list[j]) })
+	case t.changed || len(list) == 0:
+		// the sidebar's own order, which isn't treeLess order in the changed view
+		sorted = false
+		list = nil
+		for _, r := range t.rows {
+			if !r.isDir {
+				list = append(list, r.rel)
+			}
 		}
 	}
-	if cur == "" {
+	if len(list) == 0 {
 		return nil
 	}
-	dir := path.Dir(cur)
-	var sibs []*node
-	idx := -1
-	for _, r := range t.rows {
-		if r.isDir || path.Dir(r.rel) != dir {
+	next := list[0]
+	if i := slices.Index(list, cur); i >= 0 {
+		next = list[(i+d+len(list))%len(list)]
+	} else if cur != "" && sorted {
+		// where cur would be (e.g. a file created after indexing)
+		i := sort.Search(len(list), func(i int) bool { return !treeLess(list[i], cur) })
+		if d > 0 {
+			next = list[i%len(list)]
+		} else {
+			next = list[(i-1+len(list))%len(list)]
+		}
+	}
+	if next == cur {
+		return nil
+	}
+	t.reveal(next)
+	if t.changed || m.view.diff {
+		return m.openChanged(next)
+	}
+	return m.openFile(next, 0)
+}
+
+// treeLess orders paths like the sidebar: folder by folder, folders before
+// files, names compared case-insensitively.
+func treeLess(a, b string) bool {
+	pa, pb := strings.Split(a, "/"), strings.Split(b, "/")
+	for k := 0; k < len(pa) && k < len(pb); k++ {
+		if pa[k] == pb[k] {
 			continue
 		}
-		if r.rel == cur {
-			idx = len(sibs)
+		aDir, bDir := k < len(pa)-1, k < len(pb)-1
+		if aDir != bDir {
+			return aDir
 		}
-		sibs = append(sibs, r)
+		la, lb := strings.ToLower(pa[k]), strings.ToLower(pb[k])
+		if la != lb {
+			return la < lb
+		}
+		return pa[k] < pb[k]
 	}
-	if len(sibs) < 2 || idx < 0 {
-		return nil
-	}
-	n := sibs[(idx+d+len(sibs))%len(sibs)]
-	t.selectPath(n.rel)
-	if t.changed {
-		return m.openChanged(n.rel)
-	}
-	return m.openFile(n.rel, 0)
+	return len(pa) < len(pb)
 }
 
 func (m *Model) currentPath() string {
@@ -1253,7 +1413,7 @@ func helpBox() string {
 	keys := [][2]string{
 		{"ctrl+p", "find file (add :42 for a line); 1-9 0 pick recent"},
 		{"ctrl+f", "search in all files (ripgrep)"},
-		{"tab / shift+tab", "next / previous file in same dir"},
+		{"tab / shift+tab", "next / previous file"},
 		{"cmd+← / cmd+→", "focus sidebar / viewer"},
 		{"ctrl+b", "hide / show sidebar"},
 		{"j k ↑ ↓", "scroll (sidebar: move)"},

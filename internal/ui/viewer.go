@@ -34,6 +34,8 @@ type viewer struct {
 	fileCur   int // file position saved while showing the diff
 	fileOff   int
 
+	marks map[int]byte // 1-based file line -> change against HEAD (see changeMarks)
+
 	cur, off, xoff int
 	width, height  int
 
@@ -100,6 +102,18 @@ func (v *viewer) moveTo(i int) {
 	v.clamp()
 }
 
+// reveal puts the cursor on line i with some context above it: the line
+// ends up about 10 rows below the top unless it is already comfortably on
+// screen.
+func (v *viewer) reveal(i int) {
+	v.cur = clamp(i, 0, v.count()-1)
+	ctx := min(10, v.height/3)
+	if v.cur < v.off+ctx || v.cur >= v.off+v.height-ctx {
+		v.off = v.cur - ctx
+	}
+	v.clamp()
+}
+
 // scroll moves the view (mouse wheel / page keys) and drags the cursor along.
 func (v *viewer) scroll(d int) {
 	v.off = clamp(v.off+d, 0, v.count()-v.height)
@@ -143,6 +157,7 @@ func (v *viewer) setFile(rel string, c files.Content, target int) {
 	v.lines, v.styled, v.note, v.mod, v.size = c.Lines, c.Styled, c.Note, c.ModTime, c.Size
 	if !same {
 		v.cur, v.off, v.xoff, v.diff = 0, 0, 0, false
+		v.marks = nil
 	}
 	v.findMatches()
 	if target > 0 {
@@ -154,6 +169,50 @@ func (v *viewer) setFile(rel string, c files.Content, target int) {
 }
 
 var hunkRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)`)
+
+// Change marks for lines of the open file.
+const (
+	markAdd = '+' // new line
+	markMod = '~' // replaces a removed line
+	markDel = '_' // lines were removed just above this one
+)
+
+// changeMarks reads a unified diff and marks the changed lines of the new
+// file, keyed by 1-based line number.
+func changeMarks(diff string) map[int]byte {
+	marks := map[int]byte{}
+	n, del, inHunk := 0, 0, false
+	for _, l := range files.SplitLines(diff) {
+		if mm := hunkRe.FindStringSubmatch(l); mm != nil {
+			n, _ = strconv.Atoi(mm[1])
+			del, inHunk = 0, true
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "-"):
+			del++
+		case strings.HasPrefix(l, "+"):
+			if del > 0 {
+				marks[n] = markMod
+				del--
+			} else {
+				marks[n] = markAdd
+			}
+			n++
+		case strings.HasPrefix(l, `\`):
+		default:
+			if del > 0 {
+				marks[n] = markDel
+			}
+			del = 0
+			n++
+		}
+	}
+	return marks
+}
 
 // highlightDiff syntax-colours the code part of each diff line (everything
 // after the +/-/space marker), so comments and strings stand out.
@@ -233,7 +292,7 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 				break
 			}
 		}
-		v.moveTo(v.cur)
+		v.reveal(v.cur)
 	}
 	v.findMatches()
 	v.clamp()
@@ -244,7 +303,7 @@ func (v *viewer) setDiff(out string, err error, first bool) {
 func (v *viewer) showFileLine(n int) {
 	for i, num := range v.diffNums {
 		if num >= n {
-			v.moveTo(i)
+			v.reveal(i)
 			return
 		}
 	}
@@ -449,7 +508,18 @@ func (v *viewer) render(focused bool) []string {
 		} else {
 			num = sFaint.Render(num)
 		}
-		gutter := marker + num + "  "
+		bar, tint := " ", ""
+		if !v.diff {
+			switch v.marks[i+1] {
+			case markAdd:
+				bar, tint = sAdd.Render("▎"), sAddBg
+			case markMod:
+				bar, tint = sModBar.Render("▎"), sAddBg
+			case markDel:
+				bar = sDel.Render("▔")
+			}
+		}
+		gutter := marker + num + bar + " "
 
 		var body string
 		if h, ok := hits[i]; ok {
@@ -474,6 +544,10 @@ func (v *viewer) render(focused bool) []string {
 		}
 		if v.xoff > 0 {
 			body = ansi.Cut(body, v.xoff, v.xoff+avail)
+		}
+		if tint != "" {
+			out = append(out, fit(gutter+tintRow(fit(body, avail), tint), v.width))
+			continue
 		}
 		out = append(out, fit(gutter+fit(body, avail), v.width))
 	}

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,5 +289,194 @@ func TestDiffWithNoFileOpen(t *testing.T) {
 		if !m.tree.changed || m.view.rel != "b.txt" || !m.view.diff || len(m.view.diffLines) == 0 {
 			t.Fatalf("focus %d: changed=%v rel=%q diff=%v lines=%d", focus, m.tree.changed, m.view.rel, m.view.diff, len(m.view.diffLines))
 		}
+	}
+}
+
+// TestFollowJumpsToLatestEdit: a file that already had a change near the top
+// is edited further down; follow mode lands on the new edit, not the first
+// change against HEAD.
+func TestFollowJumpsToLatestEdit(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	lines := make([]string, 200)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	write := func(rel string, ls []string) {
+		os.WriteFile(filepath.Join(dir, rel), []byte(strings.Join(ls, "\n")+"\n"), 0o644)
+	}
+	git("init", "-q")
+	write("a.txt", lines)
+	write("b.txt", []string{"b"})
+	git("add", ".")
+	git("commit", "-qm", "init")
+
+	edited := append([]string(nil), lines...)
+	edited[2] = "early edit"
+	write("a.txt", edited)
+	old := time.Now().Add(-time.Minute)
+	os.Chtimes(filepath.Join(dir, "a.txt"), old, old)
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.loadCmd("b.txt", 0)())
+	m.Update(m.pollCmd()()) // baseline: snapshots a.txt with the early edit
+	m.handleKey(tea.KeyPressMsg{Code: 'f', Text: "f"})
+
+	edited[149] = "late edit"
+	write("a.txt", edited)
+	_, cmd := m.Update(m.pollCmd()())
+	for _, msg := range runBatch(cmd) {
+		if lm, ok := msg.(loadedMsg); ok {
+			m.Update(lm)
+		}
+	}
+	if m.view.rel != "a.txt" || m.view.fileLine() != 150 {
+		t.Fatalf("follow: rel=%q line=%d, want a.txt:150", m.view.rel, m.view.fileLine())
+	}
+	if m.view.cur < m.view.off || m.view.cur >= m.view.off+m.view.height {
+		t.Fatalf("edited line not on screen: cur=%d off=%d", m.view.cur, m.view.off)
+	}
+}
+
+func TestChangeMarks(t *testing.T) {
+	diff := "diff --git a/x b/x\n@@ -1,6 +1,6 @@\n a\n-b\n+B\n+new\n c\n-d\n e\n f\n"
+	got := changeMarks(diff)
+	want := map[int]byte{2: markMod, 3: markAdd, 5: markDel}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("marks = %v, want %v", got, want)
+	}
+}
+
+func TestRevealLeavesContext(t *testing.T) {
+	v := &viewer{lines: make([]string, 300), height: 40, loaded: true}
+	v.reveal(150)
+	if v.cur != 150 || v.off != 140 {
+		t.Fatalf("cur=%d off=%d, want 150/140", v.cur, v.off)
+	}
+	v.reveal(160) // already comfortably on screen: no scroll
+	if v.off != 140 {
+		t.Fatalf("off=%d after in-view reveal", v.off)
+	}
+	v.reveal(3)
+	if v.off != 0 {
+		t.Fatalf("off=%d near top", v.off)
+	}
+}
+
+func TestCycleFileAcrossFolders(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"b/x.go", "a/c/y.go", "a/z.go", "README.md", "main.go"} {
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(p)), 0o755)
+		os.WriteFile(filepath.Join(dir, p), []byte("x\n"), 0o644)
+	}
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.indexCmd()())
+	want := []string{"a/c/y.go", "a/z.go", "b/x.go", "main.go", "README.md"}
+	if fmt.Sprint(m.allFiles) != fmt.Sprint(want) {
+		t.Fatalf("order = %v", m.allFiles)
+	}
+	m.Update(m.loadCmd("b/x.go", 0)())
+	for _, step := range []struct {
+		d    int
+		want string
+	}{{1, "main.go"}, {1, "README.md"}, {1, "a/c/y.go"}, {-1, "README.md"}} {
+		m.Update(m.cycleFile(step.d)())
+		if m.view.rel != step.want {
+			t.Fatalf("tab %+d: got %q, want %q", step.d, m.view.rel, step.want)
+		}
+		if n := m.tree.selected(); n == nil || n.rel != step.want {
+			t.Fatalf("sidebar not on %q", step.want)
+		}
+	}
+}
+
+func TestCycleFileInDiffView(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	for _, p := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		os.WriteFile(filepath.Join(dir, p), []byte("x\n"), 0o644)
+	}
+	git("add", ".")
+	git("commit", "-qm", "init")
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("y\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "d.txt"), []byte("y\n"), 0o644)
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.indexCmd()())
+	m.Update(m.pollCmd()())
+	m.Update(m.loadCmd("b.txt", 0)())
+	m.view.enterDiff()
+	for _, want := range []string{"d.txt", "b.txt"} {
+		for _, msg := range runBatch(m.cycleFile(1)) {
+			m.Update(msg)
+		}
+		if m.view.rel != want || !m.view.diff {
+			t.Fatalf("tab: rel=%q diff=%v, want %q in diff", m.view.rel, m.view.diff, want)
+		}
+	}
+}
+
+// TestCycleFileChangedSidebar: in the changed-files sidebar (plain path
+// order, README.md before internal/), tab steps through every changed file.
+func TestCycleFileChangedSidebar(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	all := []string{"README.md", "internal/a.go", "internal/b.go", "internal/c.go", "z.go"}
+	for _, p := range all {
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(p)), 0o755)
+		os.WriteFile(filepath.Join(dir, p), []byte("x\n"), 0o644)
+	}
+	git("add", ".")
+	git("commit", "-qm", "init")
+	for _, p := range all[:4] {
+		os.WriteFile(filepath.Join(dir, p), []byte("y\n"), 0o644)
+	}
+
+	m := New(dir, "")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.Update(m.indexCmd()())
+	m.Update(m.pollCmd()())
+	m.focus = focusTree
+	for _, msg := range runBatch(m.handleKey(tea.KeyPressMsg{Code: 'd', Text: "d"})) {
+		m.Update(msg)
+	}
+	if !m.tree.changed || !m.view.diff {
+		t.Fatalf("not in changed view: changed=%v diff=%v", m.tree.changed, m.view.diff)
+	}
+	seen := map[string]bool{m.view.rel: true}
+	for range 4 {
+		for _, msg := range runBatch(m.cycleFile(1)) {
+			m.Update(msg)
+		}
+		if !m.view.diff {
+			t.Fatalf("%s not in diff view", m.view.rel)
+		}
+		seen[m.view.rel] = true
+	}
+	if len(seen) != 4 || seen["z.go"] {
+		t.Fatalf("visited %v, want the 4 changed files", seen)
 	}
 }

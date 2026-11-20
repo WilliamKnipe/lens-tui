@@ -33,6 +33,7 @@ var (
 	sHunk     = lipgloss.NewStyle().Foreground(colDim).Italic(true)
 	sAddBg    = "\x1b[48;2;31;51;38m"
 	sDelBg    = "\x1b[48;2;58;33;41m"
+	sModBar   = lipgloss.NewStyle().Foreground(colYellow)
 	sChip     = lipgloss.NewStyle().Background(colAccent).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
 	sBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(0, 1)
 )
@@ -158,6 +159,14 @@ func asciiLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// tintRow gives s (which may contain ANSI codes) the background bg, keeping
+// it through any resets inside s.
+func tintRow(s, bg string) string {
+	s = strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bg)
+	s = strings.ReplaceAll(s, "\x1b[m", "\x1b[m"+bg)
+	return bg + s + "\x1b[0m"
 }
 
 // diffBg returns the row tint for an added or removed diff line.
