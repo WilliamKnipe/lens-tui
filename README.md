@@ -3,6 +3,8 @@
 A minimal, read-only repo viewer for the terminal, made to sit in a split next to Claude Code.
 Sidebar file tree, syntax-highlighted viewer, VS Code-style quick open, search, and git diffs.
 
+<img width="983" height="960" alt="Screenshot 2026-11-20 at 12 25 13" src="https://github.com/user-attachments/assets/9fd0dcc4-51cc-4ffc-bfe8-f2fe6e815cce" />
+
 ## Install
 
 ```sh
